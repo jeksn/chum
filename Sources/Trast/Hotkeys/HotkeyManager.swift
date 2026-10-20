@@ -12,6 +12,7 @@ final class HotkeyManager {
     static let openScratchpad = KeyboardShortcuts.Name("openScratchpad")
     static let openTextTransformer = KeyboardShortcuts.Name("openTextTransformer")
     static let openAIChat = KeyboardShortcuts.Name("openAIChat")
+    static let openColorPicker = KeyboardShortcuts.Name("openColorPicker")
 
     private var registeredCommandIDs = Set<UUID>()
     private var registeredAppShortcutIDs = Set<UUID>()
@@ -44,6 +45,9 @@ final class HotkeyManager {
         }
         KeyboardShortcuts.onKeyUp(for: Self.openAIChat) {
             LauncherController.shared.showAIChat()
+        }
+        KeyboardShortcuts.onKeyUp(for: Self.openColorPicker) {
+            LauncherController.shared.showColorPicker()
         }
         for action in WindowAction.all {
             register(action)

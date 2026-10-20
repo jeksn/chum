@@ -35,6 +35,10 @@ final class LauncherController: NSObject, NSWindowDelegate {
         let scratchpadMode: LauncherViewModel.ScratchpadMode
         let chatMode: LauncherViewModel.ChatMode
         let chatExpanded: Bool
+        // The composer grows with wrapped/newlined drafts and the error
+        // row appears/disappears — both change the panel height.
+        let chatInput: String
+        let chatError: String?
     }
 
     override private init() {
@@ -60,10 +64,19 @@ final class LauncherController: NSObject, NSWindowDelegate {
         }
     }
 
-    func show() {
+    /// Opens the launcher on the bare search bar (nil) or directly on a
+    /// category (tool hotkeys). The category is applied BEFORE the panel is
+    /// sized: the sync resize must measure the final content — sizing the
+    /// reset state first left the panel at bare-search height and the async
+    /// observer pass then raced the signature/frame caches (see
+    /// resizePanelToFit), leaving the panel stuck on a clipped search box.
+    func show(_ category: LauncherViewModel.Category? = nil) {
         target = WindowManipulator.frontmostWindow()
         viewModel.items = makeItems()
         viewModel.reset()
+        if let category {
+            viewModel.selectCategory(category)
+        }
 
         let panel = ensurePanel()
         // A stale frame from the previous session (e.g. a one-row search
@@ -73,16 +86,25 @@ final class LauncherController: NSObject, NSWindowDelegate {
         lastTargetFrame = nil
         resizePanelToFit()
         panel.makeKeyAndOrderFront(nil)
+        // The sync measurement above can reflect the PRE-change layout when
+        // the panel already existed (the hosting view hadn't applied the
+        // reset/category switch yet) — the clipboard-hotkey "opens on an
+        // empty search box" symptom: the list renders below a bare-search-
+        // height panel. Re-measure once on the next turn with the settled
+        // layout; a correct measurement hits the unchanged target frame
+        // and stays put.
+        DispatchQueue.main.async { [weak self] in
+            guard let self, self.panel?.isVisible == true else { return }
+            self.lastLayoutSignature = nil
+            self.resizePanelToFit()
+        }
     }
 
     func showClipboard() {
         if panel?.isVisible == true, viewModel.selectedCategory == .clipboard {
             close()
         } else {
-            show()
-            DispatchQueue.main.async { [weak self] in
-                self?.viewModel.selectCategory(.clipboard)
-            }
+            show(.clipboard)
         }
     }
 
@@ -90,10 +112,7 @@ final class LauncherController: NSObject, NSWindowDelegate {
         if panel?.isVisible == true, viewModel.selectedCategory == .scratchpad {
             close()
         } else {
-            show()
-            DispatchQueue.main.async { [weak self] in
-                self?.viewModel.selectCategory(.scratchpad)
-            }
+            show(.scratchpad)
         }
     }
 
@@ -112,6 +131,7 @@ final class LauncherController: NSObject, NSWindowDelegate {
         items.append(contentsOf: LauncherAction.allCases.map { .launcherAction($0) })
         items.append(contentsOf: SnippetStore.shared.validSnippets.map { .snippetEntry($0) })
         items.append(contentsOf: ClipboardStore.shared.items.map { .clipboardEntry($0) })
+        items.append(contentsOf: ColorStore.shared.colors.map { .colorEntry($0) })
         items.append(contentsOf: LauncherViewModel.Category.visibleCases.compactMap { category -> LauncherItem? in
             switch category {
             case .all, .trast:
@@ -185,8 +205,7 @@ final class LauncherController: NSObject, NSWindowDelegate {
         if panel?.isVisible == true, viewModel.selectedCategory == .textTransformer {
             close()
         } else {
-            show()
-            viewModel.selectCategory(.textTransformer)
+            show(.textTransformer)
         }
     }
 
@@ -194,8 +213,28 @@ final class LauncherController: NSObject, NSWindowDelegate {
         if panel?.isVisible == true, viewModel.selectedCategory == .aiChat {
             close()
         } else {
-            show()
-            viewModel.selectCategory(.aiChat)
+            show(.aiChat)
+        }
+    }
+
+    func showColorPicker() {
+        if panel?.isVisible == true, viewModel.selectedCategory == .colorPicker {
+            close()
+        } else {
+            show(.colorPicker)
+        }
+    }
+
+    /// The system eyedropper: saves the picked color and reopens the
+    /// launcher on the saved-colors list (newest on top). The panel is
+    /// closed before this runs — the sampler samples the screen.
+    func pickColorFromScreen() {
+        NSColorSampler().show { [weak self] color in
+            guard let self, let color else { return } // nil = cancelled
+            let hex = ColorStore.hexString(from: color)
+            ColorStore.shared.add(hex: hex)
+            HUD.show("Saved \(hex)")
+            self.show(.colorPicker)
         }
     }
 
@@ -277,6 +316,11 @@ final class LauncherController: NSObject, NSWindowDelegate {
                 viewModel.selectCategory(.clipboard)
                 return
             }
+            if case .pickColor = action {
+                close()
+                pickColorFromScreen()
+                return
+            }
             close()
             switch action {
             case .settings:
@@ -285,12 +329,19 @@ final class LauncherController: NSObject, NSWindowDelegate {
                 UpdateChecker.checkForUpdates()
             case .quit:
                 NSApp.terminate(nil)
-            case .clipboardHistory:
+            case .clipboardHistory, .pickColor:
                 break
             }
         case .clipboardEntry(let item):
             close()
             pasteClipboardItem(item)
+        case .colorEntry(let color):
+            // Return copies the hex; rgb/hsl live on the row's context menu.
+            close()
+            let pasteboard = NSPasteboard.general
+            pasteboard.clearContents()
+            pasteboard.setString(color.hex, forType: .string)
+            HUD.show("Copied \(color.hex)")
         case .snippetEntry(let snippet):
             close()
             let clipboard = NSPasteboard.general.string(forType: .string) ?? ""
@@ -353,13 +404,25 @@ final class LauncherController: NSObject, NSWindowDelegate {
             DispatchQueue.main.async { [weak self] in
                 guard let self else { return }
                 self.resizeScheduled = false
-                self.resizePanelToFit()
+                // The measurement can lag one turn behind the state change
+                // (e.g. ↓ opening the tools view); a pass that came up with
+                // the previous frame re-measures once after the layout has
+                // settled. A pass that measured the real content no-ops
+                // through the signature cache.
+                if self.resizePanelToFit() {
+                    DispatchQueue.main.async { self.resizePanelToFit() }
+                }
             }
         }
     }
 
-    private func resizePanelToFit() {
-        guard let panel, let hostingView = panel.contentView as? NSHostingView<LauncherView> else { return }
+    /// Resizes the panel to its content. Returns true when the measurement
+    /// produced the previous frame with a NEW signature — the layout may
+    /// have lagged one turn behind the state change (fittingSize can
+    /// reflect the pre-change content), so the caller re-checks once.
+    @discardableResult
+    private func resizePanelToFit() -> Bool {
+        guard let panel, let hostingView = panel.contentView as? NSHostingView<LauncherView> else { return false }
 
         let signature = LayoutSignature(
             category: viewModel.selectedCategory,
@@ -368,12 +431,13 @@ final class LauncherController: NSObject, NSWindowDelegate {
             transformerState: viewModel.transformerState,
             scratchpadMode: viewModel.scratchpadMode,
             chatMode: viewModel.chatMode,
-            chatExpanded: viewModel.chatExpanded
+            chatExpanded: viewModel.chatExpanded,
+            chatInput: viewModel.chatInput,
+            chatError: viewModel.chatError
         )
         // The content height can't have changed (selection move, hover);
         // skip the fittingSize measurement, which forces a full layout pass.
-        if signature == lastLayoutSignature, lastTargetFrame != nil { return }
-        lastLayoutSignature = signature
+        if signature == lastLayoutSignature, lastTargetFrame != nil { return false }
 
         let fittingSize = hostingView.fittingSize
         // The expanded Quick AI view sizes itself to the viewport; everything
@@ -381,11 +445,18 @@ final class LauncherController: NSObject, NSWindowDelegate {
         let cap: CGFloat = viewModel.chatExpanded ? .greatestFiniteMagnitude : 440
         var height = min(fittingSize.height, cap)
         height = max(height, 52)
-        guard let target = targetFrame(height: height) else { return }
+        guard let target = targetFrame(height: height) else { return false }
         // Skip when the destination is unchanged: objectWillChange fires on
         // every keystroke and selection move, and restarting the easeInOut
         // resize from a mid-flight frame makes the panel visibly stutter.
-        guard target != lastTargetFrame else { return }
+        guard target != lastTargetFrame else { return true }
+        // Cache the signature only once a frame matches it. This pass may
+        // have measured the PRE-change layout (fittingSize can lag the
+        // state change by a turn); caching the new signature with the old
+        // frame would make every later pass skip above and leave the panel
+        // stuck at the old height for good — the "tool hotkey opens a
+        // bare search box that won't do anything" symptom.
+        lastLayoutSignature = signature
         lastTargetFrame = target
 
         // Animate only large jumps (mode switches) in sync with
@@ -403,6 +474,7 @@ final class LauncherController: NSObject, NSWindowDelegate {
         } else {
             panel.setFrame(target, display: true)
         }
+        return false
     }
 
     private func targetFrame(height: CGFloat) -> NSRect? {
@@ -498,6 +570,18 @@ final class LauncherController: NSObject, NSWindowDelegate {
                         return nil
                     case 48:
                         self.handleEscape()
+                        return nil
+                    case 36, 76:
+                        // Return sends, Shift+Return inserts a newline in
+                        // the composer. Both are handled here (swallowed
+                        // before the field) — macOS fires onSubmit for
+                        // Shift+Return too, so passing the event through
+                        // would send instead of breaking the line.
+                        if event.modifierFlags.contains(.shift) {
+                            self.viewModel.chatInput += "\n"
+                        } else {
+                            self.viewModel.sendChatMessage()
+                        }
                         return nil
                     default:
                         return event

@@ -16,9 +16,6 @@ struct LauncherView: View {
 
     @State private var showsCopied = false
     @State private var confirmDelete = false
-    @State private var chatInput = ""
-    @State private var chatSending = false
-    @State private var chatError: String?
     @State private var chatHasKey = false
     @State private var chatCopied = false
 
@@ -269,7 +266,7 @@ struct LauncherView: View {
     private var searchField: some View {
         HStack(spacing: 8) {
             Image(systemName: "magnifyingglass")
-                .foregroundStyle(.secondary)
+                .foregroundStyle(Theme.beak)
             TextField(viewModel.placeholder, text: $viewModel.query)
                 .textFieldStyle(.plain)
                 .font(.system(size: 20))
@@ -279,7 +276,7 @@ struct LauncherView: View {
             } label: {
                 Image(systemName: "arrow.right.to.line")
                     .font(.system(size: 13, weight: .semibold))
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(Theme.beak)
                     .frame(width: 28, height: 22)
                     .background(Capsule().fill(Color.secondary.opacity(0.15)))
             }
@@ -436,7 +433,7 @@ struct LauncherView: View {
                     chatHeader
                     Divider()
                     chatMessages
-                    if let chatError {
+                    if let chatError = viewModel.chatError {
                         Divider()
                         Text(chatError)
                             .font(.caption)
@@ -492,7 +489,7 @@ struct LauncherView: View {
 
             Button {
                 viewModel.createNewChatDiscussion()
-                chatError = nil
+                viewModel.chatError = nil
             } label: {
                 Image(systemName: "plus.square")
                     .foregroundStyle(Color.secondary)
@@ -601,7 +598,7 @@ struct LauncherView: View {
                         ChatBubbleView(message: message)
                             .id(index)
                     }
-                    if chatSending {
+                    if viewModel.chatSending {
                         HStack(spacing: 6) {
                             ProgressView()
                                 .controlSize(.small)
@@ -629,7 +626,7 @@ struct LauncherView: View {
     }
 
     private func scrollToBottom(_ proxy: ScrollViewProxy) {
-        if chatSending {
+        if viewModel.chatSending {
             proxy.scrollTo("thinking", anchor: .bottom)
         } else {
             proxy.scrollTo(max(chatStore.currentMessages.count - 1, 0), anchor: .bottom)
@@ -645,48 +642,32 @@ struct LauncherView: View {
     }
 
     private var chatInputRow: some View {
-        HStack(spacing: 10) {
-            TextField("Message…", text: $chatInput)
+        HStack(alignment: .bottom, spacing: 10) {
+            // Vertical axis: the draft grows with Shift+Return newlines
+            // (and wrapping), up to six lines before it starts scrolling.
+            TextField("Message…", text: $viewModel.chatInput, axis: .vertical)
                 .textFieldStyle(.plain)
                 .font(.system(size: 14))
+                .lineLimit(1...6)
                 .focused($chatFocused)
-                .onSubmit(sendChatMessage)
             Button {
-                sendChatMessage()
+                viewModel.sendChatMessage()
             } label: {
-                if chatSending {
+                if viewModel.chatSending {
                     ProgressView()
                         .controlSize(.small)
                 } else {
                     Image(systemName: "paperplane")
-                        .foregroundStyle(chatInput.trimmingCharacters(in: .whitespaces).isEmpty ? Color.secondary : Color.accentColor)
+                        .foregroundStyle(viewModel.chatInput.trimmingCharacters(in: .whitespaces).isEmpty ? Color.secondary : Color.accentColor)
                 }
             }
             .buttonStyle(.plain)
-            .disabled(chatSending || chatInput.trimmingCharacters(in: .whitespaces).isEmpty)
+            .padding(.bottom, 3)
+            .disabled(viewModel.chatSending || viewModel.chatInput.trimmingCharacters(in: .whitespaces).isEmpty)
             .help("Send (Return)")
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 10)
-    }
-
-    private func sendChatMessage() {
-        let text = chatInput.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !text.isEmpty, !chatSending else { return }
-        chatError = nil
-        chatInput = ""
-        chatStore.appendToCurrent(ChatMessage(role: .user, text: text))
-        chatSending = true
-        let messages = chatStore.currentMessages
-        Task { @MainActor in
-            do {
-                let reply = try await ChatService.send(messages: messages)
-                chatStore.appendToCurrent(ChatMessage(role: .assistant, text: reply))
-            } catch {
-                chatError = error.localizedDescription
-            }
-            chatSending = false
-        }
     }
 
     private var transformerTool: some View {
@@ -914,8 +895,7 @@ struct ChatBubbleView: View {
         HStack(alignment: .top, spacing: 0) {
             if message.role == .user { Spacer(minLength: 48) }
             VStack(alignment: message.role == .user ? .trailing : .leading, spacing: 2) {
-                Text(message.text)
-                    .font(.system(size: 13))
+                messageContent
                     .padding(.horizontal, 12)
                     .padding(.vertical, 8)
                     .background(
@@ -924,7 +904,6 @@ struct ChatBubbleView: View {
                                   ? Color.accentColor.opacity(0.25)
                                   : Color.secondary.opacity(0.12))
                     )
-                    .lineLimit(nil)
                 if message.role == .assistant, isHovered {
                     Button {
                         let pasteboard = NSPasteboard.general
@@ -946,6 +925,25 @@ struct ChatBubbleView: View {
             if message.role == .assistant { Spacer(minLength: 48) }
         }
         .onHover { isHovered = $0 }
+    }
+
+    /// Assistant replies render as parsed markdown blocks (headings, lists,
+    /// code fences, quotes, inline styling); user messages stay verbatim.
+    @ViewBuilder private var messageContent: some View {
+        if message.role == .assistant {
+            VStack(alignment: .leading, spacing: 8) {
+                ForEach(Array(ChatMarkdown.blocks(from: message.text).enumerated()), id: \.offset) { _, block in
+                    ChatMarkdownBlock(block: block)
+                }
+            }
+            .font(.system(size: 13))
+            .lineLimit(nil)
+            .textSelection(.enabled)
+        } else {
+            Text(message.text)
+                .font(.system(size: 13))
+                .lineLimit(nil)
+        }
     }
 }
 
@@ -1107,7 +1105,7 @@ struct LauncherRowView: View {
                     .frame(width: 22, height: 22)
             } else {
                 Image(systemName: item.icon)
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(iconForeground)
                     .frame(width: 22, height: 22)
             }
             highlightedTitle
@@ -1129,7 +1127,7 @@ struct LauncherRowView: View {
                     Text("\(toolNumber)")
                         .font(.system(size: 9, weight: .bold))
                 }
-                .foregroundStyle(.secondary)
+                .foregroundStyle(Theme.beak)
                 .padding(.horizontal, 6)
                 .padding(.vertical, 3)
                 .background(Capsule().fill(Color.secondary.opacity(0.15)))
@@ -1137,7 +1135,7 @@ struct LauncherRowView: View {
             if isFavorite {
                 Image(systemName: "star.fill")
                     .font(.system(size: 10))
-                    .foregroundStyle(.yellow)
+                    .foregroundStyle(Theme.beak)
             }
             if let hotkeyDisplay {
                 Text(hotkeyDisplay)
@@ -1158,13 +1156,44 @@ struct LauncherRowView: View {
                     viewModel.openOptions(for: item.id)
                 }
             }
+            if case .colorEntry(let color) = item {
+                Button("Copy Hex") {
+                    copyColorText(color.hex)
+                }
+                Button("Copy RGB") {
+                    copyColorText(color.rgbText)
+                }
+                Button("Copy HSL") {
+                    copyColorText(color.hslText)
+                }
+                Divider()
+                Button("Remove Color", role: .destructive) {
+                    ColorStore.shared.remove(color)
+                    LauncherController.shared.refreshItems()
+                }
+            }
         }
+    }
+
+    /// Context-menu copies keep the panel open — Return is the copy-and-
+    /// close path (hex); the menu is the quick multi-format affordance.
+    private func copyColorText(_ text: String) {
+        let pasteboard = NSPasteboard.general
+        pasteboard.clearContents()
+        pasteboard.setString(text, forType: .string)
     }
 
     /// The actions-grid number for tool rows in the recents view.
     private var toolNumber: Int? {
         if case .toolEntry(_, let number) = item { return number }
         return nil
+    }
+
+    /// Row icon color: the calculator result carries the amber accent
+    /// (a small bright glyph, like the beak); everything else stays muted.
+    private var iconForeground: Color {
+        if case .calculatorResult = item { return Theme.beak }
+        return .secondary
     }
 
     private var rowBackground: Color {

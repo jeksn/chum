@@ -7,6 +7,7 @@ import SwiftUI
 enum LauncherAction: String, CaseIterable, Identifiable {
     case settings
     case clipboardHistory
+    case pickColor
     case checkForUpdates
     case quit
 
@@ -16,6 +17,7 @@ enum LauncherAction: String, CaseIterable, Identifiable {
         switch self {
         case .settings: return "Settings"
         case .clipboardHistory: return "Clipboard History"
+        case .pickColor: return "Pick Color from Screen"
         case .checkForUpdates: return "Check for Updates"
         case .quit: return "Quit Trast"
         }
@@ -25,6 +27,7 @@ enum LauncherAction: String, CaseIterable, Identifiable {
         switch self {
         case .settings: return "gearshape"
         case .clipboardHistory: return "clipboard"
+        case .pickColor: return "eyedropper"
         case .checkForUpdates: return "arrow.clockwise.circle"
         case .quit: return "power"
         }
@@ -38,6 +41,25 @@ enum LauncherIconCache {
         cache.countLimit = 100
         return cache
     }()
+
+    /// Saved-color swatches, cached by hex so rows don't re-render their
+    /// drawing handler on every pass.
+    static func colorSwatch(for color: SavedColor) -> NSImage? {
+        let key = "swatch.\(color.hex)" as NSString
+        if let cached = cache.object(forKey: key) { return cached }
+        let image = NSImage(size: NSSize(width: 22, height: 22), flipped: false) { rect in
+            ColorStore.nsColor(for: color.hex).setFill()
+            NSBezierPath(roundedRect: rect.insetBy(dx: 1.5, dy: 1.5), xRadius: 5, yRadius: 5).fill()
+            // A faint border so white swatches survive light backgrounds.
+            NSColor.controlTextColor.withAlphaComponent(0.15).setStroke()
+            let border = NSBezierPath(roundedRect: rect.insetBy(dx: 1.5, dy: 1.5), xRadius: 5, yRadius: 5)
+            border.lineWidth = 1
+            border.stroke()
+            return true
+        }
+        cache.setObject(image, forKey: key)
+        return image
+    }
 
     /// Decoded clipboard thumbnails, cached by entry id so image rows don't
     /// re-decode their data on every render.
@@ -58,6 +80,7 @@ enum LauncherItem: Identifiable {
     case launcherAction(LauncherAction)
     case clipboardEntry(ClipboardItem)
     case snippetEntry(Snippet)
+    case colorEntry(SavedColor)
     case categoryEntry(LauncherViewModel.Category)
     case toolEntry(LauncherViewModel.Category, number: Int)
     case calculatorResult(title: String, subtitle: String, valueToCopy: String)
@@ -72,6 +95,8 @@ enum LauncherItem: Identifiable {
             return "clipboard.\(item.id.uuidString)"
         case .snippetEntry(let snippet):
             return "snippet.\(snippet.id.uuidString)"
+        case .colorEntry(let color):
+            return "color.\(color.id.uuidString)"
         case .categoryEntry(let category):
             return "category.\(category.rawValue)"
         case .toolEntry(let category, _):
@@ -95,6 +120,8 @@ enum LauncherItem: Identifiable {
             return item.displayName
         case .snippetEntry(let snippet):
             return snippet.name
+        case .colorEntry(let color):
+            return color.hex
         case .categoryEntry(let category):
             return category.label
         case .toolEntry(let category, _):
@@ -108,7 +135,7 @@ enum LauncherItem: Identifiable {
         switch self {
         case .command(_, let name), .appShortcut(_, let name), .installedApp(_, let name):
             return name
-        case .launcherAction, .clipboardEntry, .snippetEntry, .categoryEntry, .toolEntry, .calculatorResult:
+        case .launcherAction, .clipboardEntry, .snippetEntry, .colorEntry, .categoryEntry, .toolEntry, .calculatorResult:
             return nil
         }
     }
@@ -135,6 +162,8 @@ enum LauncherItem: Identifiable {
             }
         case .snippetEntry:
             return "text.append"
+        case .colorEntry:
+            return "eyedropper"
         case .categoryEntry(let category):
             return category.icon
         case .toolEntry(let category, _):
@@ -150,6 +179,8 @@ enum LauncherItem: Identifiable {
             return app.icon
         case .clipboardEntry(let item):
             return LauncherIconCache.clipboardImage(for: item)
+        case .colorEntry(let color):
+            return LauncherIconCache.colorSwatch(for: color)
         case .command, .appShortcut, .launcherAction, .snippetEntry, .categoryEntry, .toolEntry, .calculatorResult:
             return nil
         }
@@ -178,6 +209,8 @@ enum LauncherItem: Identifiable {
             return "Clipboard"
         case .snippetEntry:
             return "Snippets"
+        case .colorEntry:
+            return "Colors"
         case .categoryEntry:
             return "Browse"
         case .toolEntry:
@@ -201,6 +234,8 @@ enum LauncherItem: Identifiable {
             }
         case .snippetEntry(let snippet):
             return snippet.keyword
+        case .colorEntry(let color):
+            return color.rgbText
         case .calculatorResult(_, let subtitle, _):
             return subtitle
         default:
@@ -241,6 +276,7 @@ final class LauncherViewModel: ObservableObject {
         case trast
         case textTransformer
         case aiChat
+        case colorPicker
 
         var label: String {
             switch self {
@@ -254,6 +290,7 @@ final class LauncherViewModel: ObservableObject {
             case .trast: return "Trast"
             case .textTransformer: return "Text Transformer"
             case .aiChat: return "AI Chat"
+            case .colorPicker: return "Color Picker"
             }
         }
 
@@ -269,6 +306,7 @@ final class LauncherViewModel: ObservableObject {
             case .trast: return "gearshape"
             case .textTransformer: return "textformat"
             case .aiChat: return "sparkles"
+            case .colorPicker: return "eyedropper"
             }
         }
 
@@ -279,17 +317,18 @@ final class LauncherViewModel: ObservableObject {
             cases.append(.scratchpad)
             cases.append(.textTransformer)
             cases.append(.aiChat)
+            cases.append(.colorPicker)
             cases.append(.trast)
             return cases
         }
 
-        /// Interactive utilities rendered as tiles in the actions view —
-        /// the zone tools live in. Tiles wrap into a grid, so more tools
-        /// never means a longer list. AI Chat shows a coming-soon view until
-        /// the chat is built.
+        /// The tools listed in the unified tools view and addressed by
+        /// Cmd+1..n. Apps is the first entry; the rest follow the settings
+        /// tab toggles.
         static var toolCases: [Category] {
-            var cases: [Category] = []
+            var cases: [Category] = [.applications]
             if AppSettings.launcherClipboardTab { cases.append(.clipboard) }
+            cases.append(.colorPicker)
             if AppSettings.launcherSnippetsTab { cases.append(.snippets) }
             cases.append(.scratchpad)
             cases.append(.textTransformer)
@@ -426,6 +465,13 @@ final class LauncherViewModel: ObservableObject {
 
     @Published var chatMode: ChatMode = .chat
     @Published var chatSelectedIndex = 0
+    /// The composer draft and send state live here (not view @State) so
+    /// the LauncherController key monitor can drive the keyboard: Return
+    /// sends, Shift+Return inserts a newline, and the panel-height
+    /// LayoutSignature tracks the vertically growing field.
+    @Published var chatInput = ""
+    @Published var chatSending = false
+    @Published var chatError: String?
     /// Quick AI's expand toggle: normal launcher-sized panel vs ~80% of
     /// the viewport for long conversations.
     @Published var chatExpanded = false
@@ -567,6 +613,28 @@ final class LauncherViewModel: ObservableObject {
         focusToken = UUID()
     }
 
+    /// Sends the composer draft. Keyboard dispatch lives in the
+    /// LauncherController key monitor (Return sends, Shift+Return inserts
+    /// a newline); the send button calls this directly.
+    func sendChatMessage() {
+        let text = chatInput.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.isEmpty, !chatSending else { return }
+        chatError = nil
+        chatInput = ""
+        ChatStore.shared.appendToCurrent(ChatMessage(role: .user, text: text))
+        chatSending = true
+        let messages = ChatStore.shared.currentMessages
+        Task { @MainActor in
+            do {
+                let reply = try await ChatService.send(messages: messages)
+                ChatStore.shared.appendToCurrent(ChatMessage(role: .assistant, text: reply))
+            } catch {
+                chatError = error.localizedDescription
+            }
+            chatSending = false
+        }
+    }
+
     func deleteDiscussion(at index: Int) {
         guard let discussion = ChatStore.shared.discussions[safe: index] else { return }
         ChatStore.shared.delete(id: discussion.id)
@@ -615,7 +683,7 @@ final class LauncherViewModel: ObservableObject {
 
     func isFavoritable(_ item: LauncherItem) -> Bool {
         switch item {
-        case .calculatorResult, .clipboardEntry, .categoryEntry, .toolEntry:
+        case .calculatorResult, .clipboardEntry, .colorEntry, .categoryEntry, .toolEntry:
             return false
         default:
             return true
@@ -645,9 +713,12 @@ final class LauncherViewModel: ObservableObject {
         if trimmed.isEmpty {
             if selectedCategory == .all {
                 if showsRecentActivity {
-                    let activity = recentActivityItems()
-                    sections = Self.makeRecentSections(from: activity, favorites: favorites)
-                    filtered = sections.flatMap { $0.items }
+                    // The unified tools view: only the tool rows. Favorites
+                    // and recent items were tiers here once — they moved to
+                    // their own surfaces, search still finds everything.
+                    let toolItems = Self.toolEntries()
+                    sections = [LauncherSection(title: "Tools", items: toolItems)]
+                    filtered = toolItems
                 } else {
                     filtered = []
                     sections = []
@@ -688,7 +759,7 @@ final class LauncherViewModel: ObservableObject {
     private func includesInCategory(_ entry: SearchEntry) -> Bool {
         switch selectedCategory {
         case .all:
-            return entry.section != "Clipboard" && entry.section != "Snippets"
+            return entry.section != "Clipboard" && entry.section != "Snippets" && entry.section != "Colors"
         case .commands:
             return entry.section == "Window Commands" || entry.section == "Actions"
         case .shortcuts:
@@ -706,10 +777,12 @@ final class LauncherViewModel: ObservableObject {
             return entry.section == "Trast"
         case .textTransformer, .aiChat:
             return false
+        case .colorPicker:
+            return entry.section == "Colors"
         }
     }
 
-    private static let sectionOrder = ["Calculator", "Browse", "Window Commands", "Actions", "Shortcuts", "Applications", "Clipboard", "Snippets", "Trast"]
+    private static let sectionOrder = ["Calculator", "Browse", "Window Commands", "Actions", "Shortcuts", "Applications", "Clipboard", "Snippets", "Colors", "Trast"]
 
     private static func makeSections(from items: [LauncherItem]) -> [LauncherSection] {
         sectionOrder.compactMap { title in
@@ -718,48 +791,12 @@ final class LauncherViewModel: ObservableObject {
         }
     }
 
-    /// Sections for the recent-activity view: tools first (the unified
-    /// entry to every tool — same order as the actions grid), then
-    /// favorites, then the remaining items grouped as usual.
-    private static func makeRecentSections(from items: [LauncherItem], favorites: Set<String>) -> [LauncherSection] {
-        func isTool(_ item: LauncherItem) -> Bool {
-            if case .toolEntry = item { return true }
-            return false
-        }
-        let toolItems = items.filter(isTool)
-        let restItems = items.filter { !isTool($0) }
-        let favoriteItems = restItems.filter { favorites.contains($0.id) }
-        let recentItems = restItems.filter { !favorites.contains($0.id) }
-        var result: [LauncherSection] = []
-        if !toolItems.isEmpty {
-            result.append(LauncherSection(title: "Tools", items: toolItems))
-        }
-        if !favoriteItems.isEmpty {
-            result.append(LauncherSection(title: "Favorites", items: favoriteItems))
-        }
-        result.append(contentsOf: makeSections(from: recentItems))
-        return result
-    }
-
-    /// The ↓ view: every tool as a compact row, then favorites (always
-    /// shown, even with no usage), then up to ten recently used items.
-    /// Category entries and calculator results are excluded — the list is
-    /// what you did, not what you could browse.
-    private func recentActivityItems() -> [LauncherItem] {
-        let toolEntries = Category.toolCases.enumerated().map { index, category in
+    /// The ↓ view: every tool as a compact row, ⌘-numbered in
+    /// `Category.toolCases` order.
+    private static func toolEntries() -> [LauncherItem] {
+        Category.toolCases.enumerated().map { index, category in
             LauncherItem.toolEntry(category, number: index + 1)
         }
-        let candidates = index
-            .filter { includesInCategory($0.item) }
-            .map(\.item.item)
-            .filter { item in
-                if case .categoryEntry = item { return false }
-                return true
-            }
-        let sorted = sortedByUsage(candidates)
-        let favoriteItems = sorted.filter { favorites.contains($0.id) }
-        let recentItems = sorted.filter { !favorites.contains($0.id) }.prefix(10)
-        return toolEntries + favoriteItems + Array(recentItems)
     }
 
     private func sortedByUsage(_ items: [LauncherItem]) -> [LauncherItem] {
@@ -780,6 +817,11 @@ final class LauncherViewModel: ObservableObject {
             return ClipboardStore.shared.items.map { .clipboardEntry($0) }
         case .snippets:
             return SnippetStore.shared.validSnippets.map { .snippetEntry($0) }
+        case .colorPicker:
+            // The pick action leads the list; saved colors follow, newest
+            // first (the store keeps that order).
+            return [.launcherAction(.pickColor)]
+                + ColorStore.shared.colors.map { .colorEntry($0) }
         default:
             break
         }

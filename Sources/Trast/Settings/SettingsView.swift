@@ -45,6 +45,8 @@ struct SettingsView: View {
                 SnippetListView()
             case .clipboard:
                 ClipboardSettingsView()
+            case .colorPicker:
+                ColorPickerSettingsView()
             case .textTransformer:
                 TextTransformerSettingsView()
             case .aiChat:
@@ -63,6 +65,7 @@ enum SettingsSection: String, CaseIterable, Identifiable, Hashable {
     case shortcuts
     case snippets
     case clipboard
+    case colorPicker
     case textTransformer
     case aiChat
     case scratchpad
@@ -77,6 +80,7 @@ enum SettingsSection: String, CaseIterable, Identifiable, Hashable {
         case .shortcuts: return "Shortcuts"
         case .snippets: return "Snippets"
         case .clipboard: return "Clipboard"
+        case .colorPicker: return "Color Picker"
         case .textTransformer: return "Text Transformer"
         case .aiChat: return "AI Chat"
         case .scratchpad: return "Scratchpad"
@@ -91,6 +95,7 @@ enum SettingsSection: String, CaseIterable, Identifiable, Hashable {
         case .shortcuts: return "arrow.right.square"
         case .snippets: return "text.append"
         case .clipboard: return "clipboard"
+        case .colorPicker: return "eyedropper"
         case .textTransformer: return "textformat"
         case .aiChat: return "sparkles"
         case .scratchpad: return "square.and.pencil"
