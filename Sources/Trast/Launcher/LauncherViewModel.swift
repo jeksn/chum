@@ -374,12 +374,14 @@ final class LauncherViewModel: ObservableObject {
         case favorite
         case addShortcut
         case removeShortcut
+        case editSnippet
 
         var id: String {
             switch self {
             case .favorite: return "favorite"
             case .addShortcut: return "addShortcut"
             case .removeShortcut: return "removeShortcut"
+            case .editSnippet: return "editSnippet"
             }
         }
     }
@@ -396,6 +398,9 @@ final class LauncherViewModel: ObservableObject {
         var actions: [OptionsAction] = []
         if isFavoritable(item) {
             actions.append(.favorite)
+        }
+        if case .snippetEntry = item {
+            actions.append(.editSnippet)
         }
         if case .installedApp(_, let name) = item, name.rawValue.hasPrefix("installedApp.") {
             actions.append(.addShortcut)
@@ -439,6 +444,10 @@ final class LauncherViewModel: ObservableObject {
             AppShortcutStore.shared.remove(shortcut)
             LauncherController.shared.refreshItems()
             optionsItemID = nil
+        case .editSnippet:
+            // Snippets are managed in Settings; this is the modal's handoff.
+            optionsItemID = nil
+            LauncherController.shared.openSnippetsSettings()
         }
     }
 

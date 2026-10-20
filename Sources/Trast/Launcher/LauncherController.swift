@@ -271,29 +271,19 @@ final class LauncherController: NSObject, NSWindowDelegate {
     }
 
     /// Cmd+K (or the row context menu) opens the options modal on the
-    /// highlighted row: favorites, add-as-shortcut, and hotkey editing
-    /// without a trip to Settings. In the Snippets category it opens
-    /// Settings on the Snippets tab instead (snippet rows have nothing to
-    /// configure there); with no options-capable selection (the bare search
-    /// bar) it opens Settings rather than doing nothing.
+    /// highlighted row: favorites, add-as-shortcut, hotkey editing, and
+    /// snippet editing without a trip to Settings.
     private func showOptionsForSelectedItem() {
-        guard viewModel.selectedCategory != .scratchpad else { return }
-        if viewModel.selectedCategory == .snippets {
-            openSnippetsSettings()
-            return
-        }
-        guard let item = viewModel.selectedItem(), viewModel.isFavoritable(item) else {
-            close()
-            openSettingsWindow()
-            return
-        }
+        guard viewModel.selectedCategory != .scratchpad,
+              let item = viewModel.selectedItem(),
+              viewModel.isFavoritable(item) else { return }
         viewModel.openOptions(for: item.id)
     }
 
     /// Closes the launcher and opens Settings on the Snippets tab — the
-    /// launcher's "add a snippet" handoff (Add New Snippet row, Cmd+K in the
-    /// Snippets category).
-    private func openSnippetsSettings() {
+    /// handoff from the Add New Snippet row and the options modal's
+    /// "Edit in Settings…".
+    func openSnippetsSettings() {
         close()
         SettingsWindow.pendingSection = .snippets
         NotificationCenter.default.post(name: .openSettings, object: nil)

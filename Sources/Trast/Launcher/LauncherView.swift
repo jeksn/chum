@@ -242,6 +242,8 @@ struct LauncherView: View {
             return "Add as Shortcut…"
         case .removeShortcut:
             return "Remove Shortcut"
+        case .editSnippet:
+            return "Edit in Settings…"
         }
     }
 
@@ -253,6 +255,8 @@ struct LauncherView: View {
             return "arrow.right.square"
         case .removeShortcut:
             return "trash"
+        case .editSnippet:
+            return "pencil"
         }
     }
 
