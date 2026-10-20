@@ -48,7 +48,7 @@ final class CommandApplier {
 
         let usable = LayoutEngine.usableArea(in: screen.visibleFrame, gap: CGFloat(AppSettings.gap))
         let effective = effectiveCommand(for: command)
-        let newFrame = LayoutEngine.frame(for: LayoutEngine.Request(
+        let request = LayoutEngine.Request(
             usableArea: usable,
             currentFrame: currentFrame,
             width: effective.width,
@@ -57,14 +57,34 @@ final class CommandApplier {
             offsetX: effective.offsetX,
             offsetY: effective.offsetY,
             interGap: CGFloat(AppSettings.gap)
-        ))
+        )
+        let newFrame = LayoutEngine.frame(for: request)
 
         restoreStore.record(key: target.restoreKey, frame: currentFrame)
 
         switch WindowManipulator.setFrame(target, to: newFrame) {
-        case .applied: break
-        case .adjusted: HUD.show("App limited the window size")
-        case .failed(let error): HUD.show("Could not resize window (\(error.rawValue))")
+        case .applied:
+            break
+        case .adjusted(let actual):
+            // The app kept a different size than requested (minimum window
+            // size, etc.). Re-anchor the actual size so the anchored edge
+            // lands where the layout put it — otherwise a right-anchored
+            // window keeps the position computed for the wider request and
+            // hangs off the screen edge. No interGap here: the gap was spent
+            // in the original request.
+            let corrected = LayoutEngine.frame(for: LayoutEngine.Request(
+                usableArea: usable,
+                currentFrame: actual,
+                width: .points(actual.width),
+                height: .points(actual.height),
+                anchor: effective.anchor,
+                offsetX: effective.offsetX,
+                offsetY: effective.offsetY
+            ))
+            WindowManipulator.setFrame(target, to: corrected)
+            HUD.show("App limited the window size")
+        case .failed(let error):
+            HUD.show("Could not resize window (\(error.rawValue))")
         }
     }
 

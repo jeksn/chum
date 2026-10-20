@@ -282,5 +282,37 @@ enum LayoutEngineTests {
             t.check(gapHTop == gap, "horizontal gap top \(gapHTop) != \(gap)")
             t.check(gapHBottom == gap, "horizontal gap bottom \(gapHBottom) != \(gap)")
         }
+        t.run("LayoutEngine.clampedSizeReanchors") {
+            let screen = CGRect(x: 0, y: 0, width: 1000, height: 700)
+            let gap: CGFloat = 10
+            let usable = LayoutEngine.usableArea(in: screen, gap: gap)
+
+            func correctedFrame(actual: CGRect, anchor: Anchor) -> CGRect {
+                LayoutEngine.frame(for: LayoutEngine.Request(
+                    usableArea: usable,
+                    currentFrame: actual,
+                    width: .points(actual.width),
+                    height: .points(actual.height),
+                    anchor: anchor,
+                    offsetX: .percent(0),
+                    offsetY: .percent(0)
+                ))
+            }
+
+            let rightThird = LayoutEngine.frame(for: LayoutEngine.Request(
+                usableArea: usable, currentFrame: .zero,
+                width: .percent(100.0 / 3.0), height: .percent(100),
+                anchor: .topRight,
+                offsetX: .percent(0), offsetY: .percent(0), interGap: gap
+            ))
+            // The app clamps the 1/3 width to 400; the position must be
+            // recomputed so the anchored edge stays at the margin.
+            let clampedRight = correctedFrame(actual: CGRect(origin: rightThird.origin, size: CGSize(width: 400, height: 680)), anchor: .topRight)
+            t.check(clampedRight.width == 400 && clampedRight.height == 680, "clamped size should be preserved, got \(clampedRight)")
+            t.check(clampedRight.maxX == usable.maxX, "right-anchored clamp should keep its right edge at the margin, got \(clampedRight)")
+
+            let clampedLeft = correctedFrame(actual: CGRect(x: 0, y: 0, width: 400, height: 680), anchor: .topLeft)
+            t.check(clampedLeft.minX == usable.minX, "left-anchored clamp should keep its left edge at the margin, got \(clampedLeft)")
+        }
     }
 }

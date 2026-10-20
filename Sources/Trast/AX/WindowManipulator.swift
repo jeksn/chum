@@ -22,10 +22,35 @@ enum WindowManipulator {
         return unsafeBitCast(symbol, to: (@convention(c) (AXUIElement, UnsafeMutablePointer<CGWindowID>) -> AXError).self)
     }()
 
+    /// AXUIElementGetPID is not exposed in this SDK's Swift overlay.
+    private static let getPID: (@convention(c) (AXUIElement, UnsafeMutablePointer<pid_t>) -> AXError)? = {
+        guard let handle = dlopen("/System/Library/Frameworks/ApplicationServices.framework/ApplicationServices", RTLD_LAZY) else { return nil }
+        guard let symbol = dlsym(handle, "AXUIElementGetPID") else { return nil }
+        return unsafeBitCast(symbol, to: (@convention(c) (AXUIElement, UnsafeMutablePointer<pid_t>) -> AXError).self)
+    }()
+
     static func frontmostWindow() -> WindowRef? {
+        if let window = axFocusedWindow() { return window }
         guard let app = NSWorkspace.shared.frontmostApplication else { return nil }
         if app.bundleIdentifier == Bundle.main.bundleIdentifier { return nil }
         return window(ofProcess: app.processIdentifier)
+    }
+
+    /// Window of the AX focused application — where keyboard/key focus
+    /// actually is. `NSWorkspace.frontmostApplication` misses non-activating
+    /// floating panels (e.g. Helium): clicking them never makes the app
+    /// frontmost, so hotkeys would hit whatever is behind. Falls back to the
+    /// frontmost-application path when AX reports nothing (or ourselves).
+    private static func axFocusedWindow() -> WindowRef? {
+        let ourPID = ProcessInfo.processInfo.processIdentifier
+        let systemWide = AXUIElementCreateSystemWide()
+        var focusedAppValue: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(systemWide, kAXFocusedApplicationAttribute as CFString, &focusedAppValue) == .success,
+              let value = focusedAppValue else { return nil }
+        let focusedApp = value as! AXUIElement
+        var pid: pid_t = 0
+        guard let getPID, getPID(focusedApp, &pid) == .success, pid != 0, pid != ourPID else { return nil }
+        return window(ofProcess: pid)
     }
 
     static func lastActiveNonSelfWindow() -> WindowRef? {
@@ -100,27 +125,31 @@ enum WindowManipulator {
     }
 
     /// Outcome of setting a window frame: `.applied` when the app ended up at
-    /// the requested frame, `.adjusted` when the AX sets succeeded but the
-    /// app kept a different frame (usually its minimum window size), and
-    /// `.failed` on an AX error.
+    /// the requested frame, `.adjusted(actualFrame)` when the AX sets
+    /// succeeded but the app kept a different frame (usually its minimum
+    /// window size), and `.failed` on an AX error.
     enum FrameSetResult {
         case applied
-        case adjusted
+        case adjusted(CGRect)
         case failed(AXError)
     }
 
     @discardableResult
     static func setFrame(_ ref: WindowRef, to frame: CGRect) -> FrameSetResult {
         var lastSetError: AXError?
+        var lastObserved: CGRect?
         for _ in 0..<5 {
             lastSetError = applyFrame(ref, to: frame)
             if lastSetError == nil, let current = Self.frame(of: ref.window), isClose(current, frame) {
                 return .applied
             }
+            if let current = Self.frame(of: ref.window) {
+                lastObserved = current
+            }
             usleep(60_000)
         }
         if let lastSetError { return .failed(lastSetError) }
-        return .adjusted
+        return .adjusted(lastObserved ?? frame)
     }
 
     private static func applyFrame(_ ref: WindowRef, to frame: CGRect) -> AXError? {
