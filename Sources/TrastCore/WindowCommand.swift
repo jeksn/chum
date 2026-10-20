@@ -268,6 +268,40 @@ extension WindowCommand {
     ]
 }
 
+extension WindowCommand {
+    /// Fractions (percent) a half layout steps through on repeated
+    /// application: 1/2 → 1/3 → 2/3.
+    public static let halfCycleFractions: [Double] = [50, 100.0 / 3.0, 200.0 / 3.0]
+
+    public enum HalfCycleAxis {
+        case width
+        case height
+    }
+
+    /// The axis a half command cycles on — `.width` for left/right halves,
+    /// `.height` for top/bottom halves — or nil when the command is not a
+    /// half layout (quarters, fourths, thirds, and custom sizes don't cycle).
+    public var halfCycleAxis: HalfCycleAxis? {
+        if width == .percent(50), height == .percent(100) { return .width }
+        if width == .percent(100), height == .percent(50) { return .height }
+        return nil
+    }
+
+    /// The command with its half-dimension replaced by the cycle fraction at
+    /// `step` (wrapped). Commands that are not half layouts return self.
+    public func cycledHalf(atStep step: Int) -> WindowCommand {
+        guard let axis = halfCycleAxis else { return self }
+        let count = Self.halfCycleFractions.count
+        let fraction = Self.halfCycleFractions[((step % count) + count) % count]
+        var cycled = self
+        switch axis {
+        case .width: cycled.width = .percent(fraction)
+        case .height: cycled.height = .percent(fraction)
+        }
+        return cycled
+    }
+}
+
 public struct LegacyMigrationResult {
     public let commands: [WindowCommand]
     public let droppedActionIDs: [String: UUID]

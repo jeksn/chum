@@ -243,15 +243,18 @@ struct PreviewDiagram: View {
     var body: some View {
         GeometryReader { geo in
             let area = CGRect(x: 0, y: 0, width: geo.size.width, height: geo.size.height)
+            let previewGap = min(area.width, area.height) * 0.02
+            let usable = area.insetBy(dx: previewGap, dy: previewGap)
             let currentFrame = area.insetBy(dx: area.width * 0.25, dy: area.height * 0.25)
             let target = LayoutEngine.frame(for: LayoutEngine.Request(
-                usableArea: area,
+                usableArea: usable,
                 currentFrame: currentFrame,
                 width: command.width,
                 height: command.height,
                 anchor: command.anchor,
                 offsetX: command.offsetX,
-                offsetY: command.offsetY
+                offsetY: command.offsetY,
+                interGap: previewGap
             ))
 
             ZStack(alignment: .topLeading) {

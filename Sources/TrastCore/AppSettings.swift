@@ -8,6 +8,7 @@ public extension Array {
 
 public enum AppSettings {
     public static let gapKey = "edgeGap"
+    public static let cycleHalvesKey = "cycleHalves"
     public static let autoCheckUpdatesKey = "autoCheckUpdates"
     public static let clipboardHistorySizeKey = "clipboardHistorySize"
     public static let clipboardAutoClearKey = "clipboardAutoClearSeconds"
@@ -29,6 +30,12 @@ public enum AppSettings {
 
     public static var gap: Double {
         UserDefaults.standard.double(forKey: gapKey)
+    }
+
+    /// True when repeated application of a half command steps its size
+    /// through 1/2 → 1/3 → 2/3 (Settings → Window).
+    public static var cycleHalves: Bool {
+        UserDefaults.standard.object(forKey: cycleHalvesKey) as? Bool ?? false
     }
 
     public static var autoCheckUpdates: Bool {

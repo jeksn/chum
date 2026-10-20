@@ -99,17 +99,28 @@ enum WindowManipulator {
         return CGRect(origin: cocoaOrigin(fromAXTopLeft: point, height: cgSize.height), size: cgSize)
     }
 
+    /// Outcome of setting a window frame: `.applied` when the app ended up at
+    /// the requested frame, `.adjusted` when the AX sets succeeded but the
+    /// app kept a different frame (usually its minimum window size), and
+    /// `.failed` on an AX error.
+    enum FrameSetResult {
+        case applied
+        case adjusted
+        case failed(AXError)
+    }
+
     @discardableResult
-    static func setFrame(_ ref: WindowRef, to frame: CGRect) -> AXError? {
+    static func setFrame(_ ref: WindowRef, to frame: CGRect) -> FrameSetResult {
         var lastSetError: AXError?
         for _ in 0..<5 {
             lastSetError = applyFrame(ref, to: frame)
             if lastSetError == nil, let current = Self.frame(of: ref.window), isClose(current, frame) {
-                return nil
+                return .applied
             }
             usleep(60_000)
         }
-        return lastSetError
+        if let lastSetError { return .failed(lastSetError) }
+        return .adjusted
     }
 
     private static func applyFrame(_ ref: WindowRef, to frame: CGRect) -> AXError? {

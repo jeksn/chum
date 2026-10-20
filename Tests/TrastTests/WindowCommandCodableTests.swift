@@ -144,5 +144,42 @@ enum WindowCommandCodableTests {
             let custom = WindowCommand(name: "Mine", isDefault: false)
             t.check(custom.defaultSeed == nil, "customs have no default seed")
         }
+
+        t.run("HalfCycle.axisDetection") {
+            let leftHalf = WindowCommand(name: "Left Half", width: .percent(50), height: .percent(100), anchor: .topLeft)
+            t.check(leftHalf.halfCycleAxis == .width, "left half should cycle width")
+            let topHalf = WindowCommand(name: "Top Half", width: .percent(100), height: .percent(50), anchor: .topLeft)
+            t.check(topHalf.halfCycleAxis == .height, "top half should cycle height")
+            let quarter = WindowCommand(name: "Top Left Quarter", width: .percent(50), height: .percent(50), anchor: .topLeft)
+            t.check(quarter.halfCycleAxis == nil, "quarters should not cycle")
+            let third = WindowCommand(name: "First Third", width: .percent(100.0 / 3.0), height: .percent(100), anchor: .topLeft)
+            t.check(third.halfCycleAxis == nil, "thirds should not cycle")
+            let maximize = WindowCommand(name: "Maximize", width: .percent(100), height: .percent(100), anchor: .topLeft)
+            t.check(maximize.halfCycleAxis == nil, "maximize should not cycle")
+        }
+
+        t.run("HalfCycle.stepsThroughHalfThirdTwoThirds") {
+            let rightHalf = WindowCommand(name: "Right Half", width: .percent(50), height: .percent(100), anchor: .topRight)
+            let first = rightHalf.cycledHalf(atStep: 0)
+            t.check(first.width == .percent(50), "step 0 should stay 1/2")
+            let second = rightHalf.cycledHalf(atStep: 1)
+            t.check(second.width == .percent(100.0 / 3.0), "step 1 should be 1/3")
+            let third = rightHalf.cycledHalf(atStep: 2)
+            t.check(third.width == .percent(200.0 / 3.0), "step 2 should be 2/3")
+            let wrapped = rightHalf.cycledHalf(atStep: 3)
+            t.check(wrapped.width == .percent(50), "step 3 should wrap to 1/2")
+            t.check(second.anchor == .topRight && second.height == .percent(100), "cycling should keep the anchor and other dimension")
+        }
+
+        t.run("HalfCycle.topHalfCyclesHeight") {
+            let bottomHalf = WindowCommand(name: "Bottom Half", width: .percent(100), height: .percent(50), anchor: .bottomLeft)
+            t.check(bottomHalf.cycledHalf(atStep: 1).height == .percent(100.0 / 3.0), "bottom half step 1 height mismatch")
+            t.check(bottomHalf.cycledHalf(atStep: 2).height == .percent(200.0 / 3.0), "bottom half step 2 height mismatch")
+        }
+
+        t.run("HalfCycle.nonHalfReturnsSelf") {
+            let maximize = WindowCommand(name: "Maximize", width: .percent(100), height: .percent(100), anchor: .topLeft)
+            t.check(maximize.cycledHalf(atStep: 2) == maximize, "non-half command should be unchanged")
+        }
     }
 }

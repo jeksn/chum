@@ -6,6 +6,22 @@ final class CommandApplier {
 
     private let restoreStore = RestoreStore.shared
 
+    private var lastCycleCommandID: UUID?
+    private var halfCycleStep = 0
+
+    /// When half cycling is on, consecutive applications of the same command
+    /// advance the step (1/2 → 1/3 → 2/3); any other command resets it.
+    private func effectiveCommand(for command: WindowCommand) -> WindowCommand {
+        guard AppSettings.cycleHalves, command.halfCycleAxis != nil else { return command }
+        if lastCycleCommandID == command.id {
+            halfCycleStep = (halfCycleStep + 1) % WindowCommand.halfCycleFractions.count
+        } else {
+            halfCycleStep = 0
+            lastCycleCommandID = command.id
+        }
+        return command.cycledHalf(atStep: halfCycleStep)
+    }
+
     func apply(_ command: WindowCommand, target: WindowRef? = nil) {
         guard Accessibility.ensureTrusted(prompt: true) else {
             HUD.show("Enable Accessibility in System Settings")
@@ -31,20 +47,24 @@ final class CommandApplier {
         }
 
         let usable = LayoutEngine.usableArea(in: screen.visibleFrame, gap: CGFloat(AppSettings.gap))
+        let effective = effectiveCommand(for: command)
         let newFrame = LayoutEngine.frame(for: LayoutEngine.Request(
             usableArea: usable,
             currentFrame: currentFrame,
-            width: command.width,
-            height: command.height,
-            anchor: command.anchor,
-            offsetX: command.offsetX,
-            offsetY: command.offsetY
+            width: effective.width,
+            height: effective.height,
+            anchor: effective.anchor,
+            offsetX: effective.offsetX,
+            offsetY: effective.offsetY,
+            interGap: CGFloat(AppSettings.gap)
         ))
 
         restoreStore.record(key: target.restoreKey, frame: currentFrame)
 
-        if let error = WindowManipulator.setFrame(target, to: newFrame) {
-            HUD.show("Could not resize window (\(error.rawValue))")
+        switch WindowManipulator.setFrame(target, to: newFrame) {
+        case .applied: break
+        case .adjusted: HUD.show("App limited the window size")
+        case .failed(let error): HUD.show("Could not resize window (\(error.rawValue))")
         }
     }
 
@@ -73,8 +93,10 @@ final class CommandApplier {
 
         restoreStore.record(key: target.restoreKey, frame: currentFrame)
 
-        if let error = WindowManipulator.setFrame(target, to: newFrame) {
-            HUD.show("Could not move window (\(error.rawValue))")
+        switch WindowManipulator.setFrame(target, to: newFrame) {
+        case .applied: break
+        case .adjusted: HUD.show("App limited the window size")
+        case .failed(let error): HUD.show("Could not move window (\(error.rawValue))")
         }
     }
 
@@ -98,8 +120,10 @@ final class CommandApplier {
 
         restoreStore.record(key: target.restoreKey, frame: currentFrame)
 
-        if let error = WindowManipulator.setFrame(target, to: previousFrame) {
-            HUD.show("Could not restore window (\(error.rawValue))")
+        switch WindowManipulator.setFrame(target, to: previousFrame) {
+        case .applied: break
+        case .adjusted: HUD.show("App limited the window size")
+        case .failed(let error): HUD.show("Could not restore window (\(error.rawValue))")
         }
     }
 }

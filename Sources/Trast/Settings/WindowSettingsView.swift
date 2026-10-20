@@ -4,6 +4,7 @@ import TrastCore
 
 struct WindowSettingsView: View {
     @AppStorage(AppSettings.gapKey) private var gap: Double = 0
+    @AppStorage(AppSettings.cycleHalvesKey) private var cycleHalves = false
 
     var body: some View {
         Form {
@@ -24,17 +25,19 @@ struct WindowSettingsView: View {
             }
 
             Section {
-                Picker("Edge gap", selection: $gap) {
+                Picker("Gap", selection: $gap) {
                     Text("Small").tag(10.0)
                     Text("Medium").tag(20.0)
                     Text("Large").tag(40.0)
                     Text("Extra Large").tag(60.0)
                 }
                 .pickerStyle(.segmented)
+
+                Toggle("Cycle half sizes", isOn: $cycleHalves)
             } header: {
                 Text("Sizing")
             } footer: {
-                Text("Spacing between windows and screen edges.")
+                Text("Spacing between windows and screen edges. With cycle on, pressing the same half command again steps its size through 1/2, 1/3 and 2/3; any other command resets the cycle.")
             }
         }
         .formStyle(.grouped)
