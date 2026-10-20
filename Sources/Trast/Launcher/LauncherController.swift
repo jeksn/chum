@@ -272,12 +272,31 @@ final class LauncherController: NSObject, NSWindowDelegate {
 
     /// Cmd+K (or the row context menu) opens the options modal on the
     /// highlighted row: favorites, add-as-shortcut, and hotkey editing
-    /// without a trip to Settings. Toggle semantics when already open.
+    /// without a trip to Settings. In the Snippets category it opens
+    /// Settings on the Snippets tab instead (snippet rows have nothing to
+    /// configure there); with no options-capable selection (the bare search
+    /// bar) it opens Settings rather than doing nothing.
     private func showOptionsForSelectedItem() {
-        guard viewModel.selectedCategory != .scratchpad,
-              let item = viewModel.selectedItem(),
-              viewModel.isFavoritable(item) else { return }
+        guard viewModel.selectedCategory != .scratchpad else { return }
+        if viewModel.selectedCategory == .snippets {
+            openSnippetsSettings()
+            return
+        }
+        guard let item = viewModel.selectedItem(), viewModel.isFavoritable(item) else {
+            close()
+            openSettingsWindow()
+            return
+        }
         viewModel.openOptions(for: item.id)
+    }
+
+    /// Closes the launcher and opens Settings on the Snippets tab — the
+    /// launcher's "add a snippet" handoff (Add New Snippet row, Cmd+K in the
+    /// Snippets category).
+    private func openSnippetsSettings() {
+        close()
+        SettingsWindow.pendingSection = .snippets
+        NotificationCenter.default.post(name: .openSettings, object: nil)
     }
 
     /// Closes the launcher and opens Settings on the Shortcuts tab with the
@@ -321,6 +340,10 @@ final class LauncherController: NSObject, NSWindowDelegate {
                 pickColorFromScreen()
                 return
             }
+            if case .addSnippet = action {
+                openSnippetsSettings()
+                return
+            }
             close()
             switch action {
             case .settings:
@@ -329,7 +352,7 @@ final class LauncherController: NSObject, NSWindowDelegate {
                 UpdateChecker.checkForUpdates()
             case .quit:
                 NSApp.terminate(nil)
-            case .clipboardHistory, .pickColor:
+            case .clipboardHistory, .pickColor, .addSnippet:
                 break
             }
         case .clipboardEntry(let item):

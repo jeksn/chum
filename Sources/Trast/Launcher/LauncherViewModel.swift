@@ -8,6 +8,7 @@ enum LauncherAction: String, CaseIterable, Identifiable {
     case settings
     case clipboardHistory
     case pickColor
+    case addSnippet
     case checkForUpdates
     case quit
 
@@ -18,6 +19,7 @@ enum LauncherAction: String, CaseIterable, Identifiable {
         case .settings: return "Settings"
         case .clipboardHistory: return "Clipboard History"
         case .pickColor: return "Pick Color from Screen"
+        case .addSnippet: return "Add New Snippet"
         case .checkForUpdates: return "Check for Updates"
         case .quit: return "Quit Trast"
         }
@@ -28,6 +30,7 @@ enum LauncherAction: String, CaseIterable, Identifiable {
         case .settings: return "gearshape"
         case .clipboardHistory: return "clipboard"
         case .pickColor: return "eyedropper"
+        case .addSnippet: return "plus.square.on.square"
         case .checkForUpdates: return "arrow.clockwise.circle"
         case .quit: return "power"
         }
@@ -816,7 +819,9 @@ final class LauncherViewModel: ObservableObject {
         case .clipboard:
             return ClipboardStore.shared.items.map { .clipboardEntry($0) }
         case .snippets:
-            return SnippetStore.shared.validSnippets.map { .snippetEntry($0) }
+            // The add action leads the list; snippets follow.
+            return [.launcherAction(.addSnippet)]
+                + SnippetStore.shared.validSnippets.map { .snippetEntry($0) }
         case .colorPicker:
             // The pick action leads the list; saved colors follow, newest
             // first (the store keeps that order).
