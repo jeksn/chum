@@ -293,25 +293,39 @@ struct LauncherView: View {
     }
 
     private var scratchpad: some View {
-        Group {
-            if viewModel.scratchpadMode == .notesList {
-                notesList
-                    .transition(.blurFade)
-            } else {
-                noteEditor
-                    .transition(.blurFade)
-            }
+        HStack(spacing: 0) {
+            notesSidebar
+            Divider()
+            noteEditor
         }
         .onChange(of: viewModel.selectedCategory) { category in
             if category != .scratchpad {
                 confirmDelete = false
             }
         }
-        .onChange(of: viewModel.scratchpadMode) { mode in
-            if mode == .notesList {
-                confirmDelete = false
+    }
+
+    /// The persistent notes sidebar — the old Cmd+P notes list, now always
+    /// visible beside the editor. Click a row to open the note.
+    private var notesSidebar: some View {
+        ScrollView {
+            LazyVStack(spacing: 0) {
+                ForEach(notesStore.notes) { note in
+                    NoteRowView(
+                        note: note,
+                        isSelected: note.id == notesStore.currentNote?.id,
+                        isHovered: viewModel.hoveredID == note.id.uuidString
+                    )
+                    .id(note.id)
+                    .onHover { hovering in
+                        viewModel.setHovered(note.id.uuidString, hovering: hovering)
+                    }
+                    .onTapGesture { viewModel.openNote(note.id) }
+                }
             }
+            .padding(.vertical, 4)
         }
+        .frame(width: 220).frame(maxHeight: 340)
     }
 
     private var noteText: String {
@@ -345,7 +359,7 @@ struct LauncherView: View {
             Divider()
 
             HStack(spacing: 16) {
-                Text("⌘N New · ⌘P Notes")
+                Text("⌘N New")
                     .font(.caption)
                     .foregroundStyle(.tertiary)
 
@@ -386,15 +400,6 @@ struct LauncherView: View {
                     .help("New note (⌘N)")
 
                     Button {
-                        viewModel.toggleNotesList()
-                    } label: {
-                        Image(systemName: "list.bullet")
-                            .foregroundStyle(Color.secondary)
-                    }
-                    .buttonStyle(.plain)
-                    .help("All notes (⌘P)")
-
-                    Button {
                         let pasteboard = NSPasteboard.general
                         pasteboard.clearContents()
                         pasteboard.setString(noteText, forType: .string)
@@ -430,25 +435,27 @@ struct LauncherView: View {
 
     private var aiChatTool: some View {
         Group {
-            if viewModel.chatMode == .history {
-                chatHistoryList
-            } else if chatHasKey {
-                VStack(spacing: 0) {
-                    chatHeader
+            if chatHasKey {
+                HStack(spacing: 0) {
+                    chatSidebar
                     Divider()
-                    chatMessages
-                    if let chatError = viewModel.chatError {
+                    VStack(spacing: 0) {
+                        chatHeader
                         Divider()
-                        Text(chatError)
-                            .font(.caption)
-                            .foregroundStyle(.red)
-                            .lineLimit(1)
-                            .padding(.horizontal, 16)
-                            .padding(.vertical, 6)
-                            .frame(maxWidth: .infinity, alignment: .leading)
+                        chatMessages
+                        if let chatError = viewModel.chatError {
+                            Divider()
+                            Text(chatError)
+                                .font(.caption)
+                                .foregroundStyle(.red)
+                                .lineLimit(1)
+                                .padding(.horizontal, 16)
+                                .padding(.vertical, 6)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                        }
+                        Divider()
+                        chatInputRow
                     }
-                    Divider()
-                    chatInputRow
                 }
             } else {
                 VStack(spacing: 8) {
@@ -502,15 +509,6 @@ struct LauncherView: View {
             .help("New discussion (⌘N)")
 
             Button {
-                viewModel.toggleChatHistory()
-            } label: {
-                Image(systemName: "clock.arrow.circlepath")
-                    .foregroundStyle(Color.secondary)
-            }
-            .buttonStyle(.plain)
-            .help("Previous discussions (⌘P)")
-
-            Button {
                 viewModel.chatExpanded.toggle()
             } label: {
                 Image(systemName: "arrow.up.left.and.arrow.down.right")
@@ -523,62 +521,34 @@ struct LauncherView: View {
         .padding(.vertical, 8)
     }
 
-    /// The previous-discussions list — the same shape as the Scratchpad's
-    /// notes list, not a modal.
-    private var chatHistoryList: some View {
-        VStack(spacing: 0) {
-            ScrollViewReader { proxy in
-                ScrollView {
-                    LazyVStack(spacing: 0) {
-                        if chatStore.discussions.isEmpty {
-                            Text("No discussions yet")
-                                .font(.caption)
-                                .foregroundStyle(.tertiary)
-                                .padding(16)
-                        }
-                        ForEach(Array(chatStore.discussions.enumerated()), id: \.element.id) { index, discussion in
-                            ChatDiscussionRowView(
-                                discussion: discussion,
-                                isSelected: index == viewModel.chatSelectedIndex,
-                                isHovered: viewModel.hoveredID == discussion.id.uuidString,
-                                onDelete: { viewModel.deleteDiscussion(at: index) }
-                            )
-                            .id(discussion.id)
-                            .onHover { hovering in
-                                viewModel.setHovered(discussion.id.uuidString, hovering: hovering)
-                            }
-                            .onTapGesture { viewModel.openSelectedDiscussionID(discussion.id) }
-                        }
-                    }
-                    .padding(.vertical, 4)
+    /// The persistent discussions sidebar — the old Cmd+P history list, now
+    /// always visible beside the conversation. Click a row to open it.
+    private var chatSidebar: some View {
+        ScrollView {
+            LazyVStack(spacing: 0) {
+                if chatStore.discussions.isEmpty {
+                    Text("No discussions yet")
+                        .font(.caption)
+                        .foregroundStyle(.tertiary)
+                        .padding(16)
                 }
-                .frame(maxHeight: 360)
-                .onChange(of: viewModel.chatSelectedIndex) { index in
-                    if let discussion = chatStore.discussions[safe: index] {
-                        proxy.scrollTo(discussion.id, anchor: .center)
+                ForEach(Array(chatStore.discussions.enumerated()), id: \.element.id) { index, discussion in
+                    ChatDiscussionRowView(
+                        discussion: discussion,
+                        isSelected: discussion.id == chatStore.currentDiscussion?.id,
+                        isHovered: viewModel.hoveredID == discussion.id.uuidString,
+                        onDelete: { viewModel.deleteDiscussion(at: index) }
+                    )
+                    .id(discussion.id)
+                    .onHover { hovering in
+                        viewModel.setHovered(discussion.id.uuidString, hovering: hovering)
                     }
+                    .onTapGesture { viewModel.openSelectedDiscussionID(discussion.id) }
                 }
             }
-
-            Divider()
-
-            HStack(spacing: 16) {
-                Text("Return opens · Esc back")
-                    .font(.caption)
-                    .foregroundStyle(.tertiary)
-                Spacer()
-                Button {
-                    viewModel.createNewChatDiscussion()
-                } label: {
-                    Image(systemName: "plus.square")
-                        .foregroundStyle(Color.secondary)
-                }
-                .buttonStyle(.plain)
-                .help("New discussion (⌘N)")
-            }
-            .padding(.horizontal, 16)
-            .padding(.vertical, 10)
+            .padding(.vertical, 4)
         }
+        .frame(width: 220).frame(maxHeight: 340)
     }
 
     private func copyTranscript() {
@@ -783,54 +753,6 @@ struct LauncherView: View {
             .joined(separator: " ")
             .trimmingCharacters(in: .whitespaces)
         return String(flattened.prefix(120))
-    }
-
-    private var notesList: some View {        VStack(spacing: 0) {
-            ScrollViewReader { proxy in
-                ScrollView {
-                    LazyVStack(spacing: 0) {
-                        ForEach(Array(notesStore.notes.enumerated()), id: \.element.id) { index, note in
-                            NoteRowView(
-                                note: note,
-                                isSelected: index == viewModel.notesSelectedIndex,
-                                isHovered: viewModel.hoveredID == note.id.uuidString
-                            )
-                            .id(note.id)
-                            .onHover { hovering in
-                                viewModel.setHovered(note.id.uuidString, hovering: hovering)
-                            }
-                            .onTapGesture { viewModel.openNote(note.id) }
-                        }
-                    }
-                    .padding(.vertical, 4)
-                }
-                .frame(maxHeight: 360)
-                .onChange(of: viewModel.notesSelectedIndex) { index in
-                    if let note = notesStore.notes[safe: index] {
-                        proxy.scrollTo(note.id, anchor: .center)
-                    }
-                }
-            }
-
-            Divider()
-
-            HStack(spacing: 16) {
-                Text("Return opens · Esc back")
-                    .font(.caption)
-                    .foregroundStyle(.tertiary)
-                Spacer()
-                Button {
-                    viewModel.createNote()
-                } label: {
-                    Image(systemName: "plus.square")
-                        .foregroundStyle(Color.secondary)
-                }
-                .buttonStyle(.plain)
-                .help("New note (⌘N)")
-            }
-            .padding(.horizontal, 16)
-            .padding(.vertical, 10)
-        }
     }
 
     private var selectedID: String? {

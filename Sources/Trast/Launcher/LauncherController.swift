@@ -27,13 +27,11 @@ final class LauncherController: NSObject, NSWindowDelegate {
         let category: LauncherViewModel.Category
         let sectionTitles: [String]
         let rowCount: Int
-        // Tool-internal modes swap views of very different heights under the
-        // same category (transformer capturing → ready; scratchpad editor →
-        // notes list) — without them in the signature the panel keeps the
-        // height measured for the previous mode and clips the new content.
+        // Tool-internal state swaps views of very different heights under
+        // the same category (transformer capturing → ready) — without it in
+        // the signature the panel keeps the height measured for the previous
+        // state and clips the new content.
         let transformerState: LauncherViewModel.TransformerState
-        let scratchpadMode: LauncherViewModel.ScratchpadMode
-        let chatMode: LauncherViewModel.ChatMode
         let chatExpanded: Bool
         // The composer grows with wrapped/newlined drafts and the error
         // row appears/disappears — both change the panel height.
@@ -442,8 +440,6 @@ final class LauncherController: NSObject, NSWindowDelegate {
             sectionTitles: viewModel.sections.map(\.title),
             rowCount: viewModel.filtered.count,
             transformerState: viewModel.transformerState,
-            scratchpadMode: viewModel.scratchpadMode,
-            chatMode: viewModel.chatMode,
             chatExpanded: viewModel.chatExpanded,
             chatInput: viewModel.chatInput,
             chatError: viewModel.chatError
@@ -458,7 +454,7 @@ final class LauncherController: NSObject, NSWindowDelegate {
         let cap: CGFloat = viewModel.chatExpanded ? .greatestFiniteMagnitude : 440
         var height = min(fittingSize.height, cap)
         height = max(height, 52)
-        guard let target = targetFrame(height: height) else { return false }
+        guard let target = targetFrame(width: Self.panelWidth(for: viewModel.selectedCategory), height: height) else { return false }
         // Skip when the destination is unchanged: objectWillChange fires on
         // every keystroke and selection move, and restarting the easeInOut
         // resize from a mid-flight frame makes the panel visibly stutter.
@@ -478,7 +474,7 @@ final class LauncherController: NSObject, NSWindowDelegate {
         // frame before SwiftUI re-applies the corner mask. Small deltas
         // (search results growing/shrinking) snap, which reads as smooth
         // incremental tracking and avoids animation pile-up while typing.
-        if panel.isVisible, abs(target.height - panel.frame.height) > 60 {
+        if panel.isVisible, abs(target.height - panel.frame.height) > 60 || abs(target.width - panel.frame.width) > 60 {
             NSAnimationContext.runAnimationGroup { context in
                 context.duration = 0.18
                 context.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
@@ -490,15 +486,23 @@ final class LauncherController: NSObject, NSWindowDelegate {
         return false
     }
 
-    private func targetFrame(height: CGFloat) -> NSRect? {
-        guard let panel else { return nil }
+    /// The panel width per category: the two sidebar tools get a wider
+    /// panel so the sidebar doesn't squeeze the editor/conversation.
+    private static func panelWidth(for category: LauncherViewModel.Category) -> CGFloat {
+        switch category {
+        case .scratchpad, .aiChat: return 840
+        default: return 640
+        }
+    }
+
+    private func targetFrame(width: CGFloat, height: CGFloat) -> NSRect? {
         let mouse = NSEvent.mouseLocation
         let screen = NSScreen.screens.first { $0.frame.contains(mouse) } ?? NSScreen.main
         guard let screen else { return nil }
         let visible = screen.visibleFrame
         let scale = screen.backingScaleFactor
         // Pixel-align size and origin to avoid sub-pixel jitter on non-HiDPI displays.
-        let alignedWidth = (panel.frame.width * scale).rounded() / scale
+        let alignedWidth = (width * scale).rounded() / scale
         let alignedHeight = (height * scale).rounded() / scale
         let x = visible.midX - alignedWidth / 2
         // Never target below the visible frame: a panel taller than the
@@ -562,63 +566,32 @@ final class LauncherController: NSObject, NSWindowDelegate {
                 }
             }
 
-            // AI Chat: chat mode lets typing and Return reach the message
-            // field; the history list (Cmd+P, same shape as the Scratchpad's
-            // notes list) handles its own navigation; Cmd+N starts a new
-            // discussion from either mode.
+            // AI Chat: typing and Return reach the message field; Cmd+N
+            // starts a new discussion. Return sends, Shift+Return inserts a
+            // newline — both swallowed before the field (macOS fires
+            // onSubmit for Shift+Return too). Esc/Tab are launcher
+            // navigation.
             if self.viewModel.selectedCategory == .aiChat {
                 if event.modifierFlags.contains(.command), event.keyCode == 45 {
                     self.viewModel.createNewChatDiscussion()
                     return nil
                 }
-                if event.modifierFlags.contains(.command), event.keyCode == 35 {
-                    self.viewModel.toggleChatHistory()
+                switch event.keyCode {
+                case 53:
+                    self.handleEscape()
                     return nil
-                }
-                switch self.viewModel.chatMode {
-                case .chat:
-                    switch event.keyCode {
-                    case 53:
-                        self.handleEscape()
-                        return nil
-                    case 48:
-                        self.handleEscape()
-                        return nil
-                    case 36, 76:
-                        // Return sends, Shift+Return inserts a newline in
-                        // the composer. Both are handled here (swallowed
-                        // before the field) — macOS fires onSubmit for
-                        // Shift+Return too, so passing the event through
-                        // would send instead of breaking the line.
-                        if event.modifierFlags.contains(.shift) {
-                            self.viewModel.chatInput += "\n"
-                        } else {
-                            self.viewModel.sendChatMessage()
-                        }
-                        return nil
-                    default:
-                        return event
+                case 48:
+                    self.handleEscape()
+                    return nil
+                case 36, 76:
+                    if event.modifierFlags.contains(.shift) {
+                        self.viewModel.chatInput += "\n"
+                    } else {
+                        self.viewModel.sendChatMessage()
                     }
-                case .history:
-                    switch event.keyCode {
-                    case 125:
-                        self.viewModel.moveChatSelection(1)
-                        return nil
-                    case 126:
-                        self.viewModel.moveChatSelection(-1)
-                        return nil
-                    case 36, 76:
-                        self.viewModel.openSelectedDiscussion()
-                        return nil
-                    case 53:
-                        self.viewModel.toggleChatHistory()
-                        return nil
-                    case 48:
-                        self.handleEscape()
-                        return nil
-                    default:
-                        return nil
-                    }
+                    return nil
+                default:
+                    return event
                 }
             }
 
@@ -647,53 +620,23 @@ final class LauncherController: NSObject, NSWindowDelegate {
                 }
             }
 
-            // Scratchpad mode: the editor needs Return, arrows, and all text
+            // Scratchpad: the editor needs Return, arrows, and all text
             // keys; only Esc and Tab are launcher navigation. Cmd+N creates
-            // a note, Cmd+P toggles the notes list; the list handles its own
-            // navigation.
+            // a note. The notes sidebar is click-driven.
             if self.viewModel.selectedCategory == .scratchpad {
                 if event.modifierFlags.contains(.command), event.keyCode == 45 {
                     self.viewModel.createNote()
                     return nil
                 }
-                if event.modifierFlags.contains(.command), event.keyCode == 35 {
-                    self.viewModel.toggleNotesList()
+                switch event.keyCode {
+                case 53:
+                    self.handleEscape()
                     return nil
-                }
-                switch self.viewModel.scratchpadMode {
-                case .editor:
-                    switch event.keyCode {
-                    case 53:
-                        self.handleEscape()
-                        return nil
-                    case 48:
-                        self.handleEscape()
-                        return nil
-                    default:
-                        return event
-                    }
-                case .notesList:
-                    switch event.keyCode {
-                    case 125:
-                        self.viewModel.moveNotesSelection(1)
-                        return nil
-                    case 126:
-                        self.viewModel.moveNotesSelection(-1)
-                        return nil
-                    case 36, 76:
-                        self.viewModel.openSelectedNote()
-                        return nil
-                    case 53:
-                        self.viewModel.scratchpadMode = .editor
-                        return nil
-                    case 48:
-                        self.handleEscape()
-                        return nil
-                    default:
-                        // No visible editor to receive typing while the
-                        // list is up.
-                        return nil
-                    }
+                case 48:
+                    self.handleEscape()
+                    return nil
+                default:
+                    return event
                 }
             }
 

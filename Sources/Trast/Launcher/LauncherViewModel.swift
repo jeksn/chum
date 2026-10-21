@@ -254,12 +254,6 @@ struct LauncherSection: Identifiable {
 }
 
 final class LauncherViewModel: ObservableObject {
-    /// The scratchpad tool has two modes: editing the current note, and the
-    /// notes list (Cmd+P) for switching between them.
-    enum ScratchpadMode {
-        case editor
-        case notesList
-    }
 
     /// A launch candidate with everything the search path needs resolved once
     /// when the item list is built, instead of on every keystroke.
@@ -467,16 +461,6 @@ final class LauncherViewModel: ObservableObject {
         }
     }
 
-    /// The AI Chat tool has two modes: the conversation, and the previous-
-    /// discussions list (Cmd+P) — the same shape as the Scratchpad's editor
-    /// and notes list.
-    enum ChatMode {
-        case chat
-        case history
-    }
-
-    @Published var chatMode: ChatMode = .chat
-    @Published var chatSelectedIndex = 0
     /// The composer draft and send state live here (not view @State) so
     /// the LauncherController key monitor can drive the keyboard: Return
     /// sends, Shift+Return inserts a newline, and the panel-height
@@ -487,8 +471,6 @@ final class LauncherViewModel: ObservableObject {
     /// Quick AI's expand toggle: normal launcher-sized panel vs ~80% of
     /// the viewport for long conversations.
     @Published var chatExpanded = false
-    @Published var scratchpadMode: ScratchpadMode = .editor
-    @Published var notesSelectedIndex = 0
 
     /// The Text Transformer tool captures the frontmost app's selection on
     /// entry and previews transformations over it.
@@ -549,8 +531,6 @@ final class LauncherViewModel: ObservableObject {
         selectedIndex = 0
         focusToken = UUID()
         showsRecentActivity = false
-        scratchpadMode = .editor
-        notesSelectedIndex = 0
         favorites = FavoritesStore.shared.ids
     }
 
@@ -559,69 +539,24 @@ final class LauncherViewModel: ObservableObject {
     /// Cmd+N / the New button: a fresh empty note, opened in the editor.
     func createNote() {
         NotesStore.shared.createNote()
-        scratchpadMode = .editor
-        notesSelectedIndex = 0
         focusToken = UUID()
     }
 
-    /// Cmd+P: switch between the editor and the notes list.
-    func toggleNotesList() {
-        scratchpadMode = scratchpadMode == .notesList ? .editor : .notesList
-        notesSelectedIndex = 0
-        if scratchpadMode == .editor {
-            focusToken = UUID()
-        }
-    }
-
-    /// Opens a note from the list in the editor.
+    /// Opens a note from the sidebar in the editor.
     func openNote(_ id: UUID) {
         NotesStore.shared.open(id: id)
-        scratchpadMode = .editor
         focusToken = UUID()
-    }
-
-    func moveNotesSelection(_ delta: Int) {
-        let count = NotesStore.shared.notes.count
-        guard count > 0 else { return }
-        notesSelectedIndex = (notesSelectedIndex + delta + count) % count
-    }
-
-    func openSelectedNote() {
-        guard let note = NotesStore.shared.notes[safe: notesSelectedIndex] else { return }
-        openNote(note.id)
     }
 
     // MARK: - AI Chat
 
     func createNewChatDiscussion() {
         ChatStore.shared.newDiscussion()
-        chatMode = .chat
-        chatSelectedIndex = 0
         focusToken = UUID()
-    }
-
-    func toggleChatHistory() {
-        chatMode = chatMode == .history ? .chat : .history
-        chatSelectedIndex = 0
-        if chatMode == .chat {
-            focusToken = UUID()
-        }
-    }
-
-    func moveChatSelection(_ delta: Int) {
-        let count = ChatStore.shared.discussions.count
-        guard count > 0 else { return }
-        chatSelectedIndex = (chatSelectedIndex + delta + count) % count
-    }
-
-    func openSelectedDiscussion() {
-        guard let discussion = ChatStore.shared.discussions[safe: chatSelectedIndex] else { return }
-        openSelectedDiscussionID(discussion.id)
     }
 
     func openSelectedDiscussionID(_ id: UUID) {
         ChatStore.shared.open(id: id)
-        chatMode = .chat
         focusToken = UUID()
     }
 
@@ -650,7 +585,6 @@ final class LauncherViewModel: ObservableObject {
     func deleteDiscussion(at index: Int) {
         guard let discussion = ChatStore.shared.discussions[safe: index] else { return }
         ChatStore.shared.delete(id: discussion.id)
-        chatSelectedIndex = min(chatSelectedIndex, max(ChatStore.shared.discussions.count - 1, 0))
     }
 
     // MARK: - Text Transformer
@@ -857,13 +791,7 @@ final class LauncherViewModel: ObservableObject {
         selectedIndex = 0
         query = ""
         focusToken = UUID()
-        if category == .scratchpad {
-            scratchpadMode = .editor
-            notesSelectedIndex = 0
-        }
         if category == .aiChat {
-            chatMode = .chat
-            chatSelectedIndex = 0
             chatExpanded = false
         }
         if category == .textTransformer {
