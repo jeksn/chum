@@ -1,5 +1,17 @@
 # Changelog
 
+## v0.12.0 — Sidebars, archive, Color Picker (Oct 23, 2026)
+
+- **Scratchpad and AI Chat sidebars**: both tools show a persistent list beside the editor/conversation (notes and previous discussions were a Cmd+P full-screen swap before) — click a row to open it, ⌘N makes a new one, and the panel widens and fades smoothly between the search bar and the tools
+- **Archive**: right-click a note or chat to Archive or Delete it; a Notes/Chats | Archive toggle at the top of the sidebar lists archived items with Unarchive — the editor never opens an archived note and archived chats never auto-open
+- **Color Picker**: an eyedropper tool (own hotkey, Settings → Color Picker) that saves picked colors to a list in the launcher; Return copies the hex, the row context menu copies RGB/HSL or removes the color
+- **AI Chat markdown**: assistant replies render as markdown — headings, lists, quotes, tables, and fenced code blocks; raw markdown is kept on copy
+- **Uniform window spacing**: the gap setting now also applies between windows — two half commands leave the same space in the middle as on the screen edges, and every layout gets it all the way around
+- **Half-size cycling** (Settings → Window → Cycle half sizes): pressing a half command again steps 1/2 → 1/3 → 2/3, like Raycast
+- **Window fixes**: floating panels (Helium) now resize correctly — hotkeys follow keyboard focus instead of the frontmost app; apps that enforce a minimum window size keep their anchored edge on the screen instead of hanging off it, with a HUD explaining the limit
+- **Hyperkey reliability**: the engine runs its event tap on a dedicated thread and now heals itself — a watchdog rebuilds the tap when it silently stops receiving events (wake-from-sleep, Secure Input aftermath) within seconds of your next keystroke
+- **Launcher**: reopens on the category you left it on; "Add New Snippet" row in the Snippets tool; Cmd+K always opens the row options modal; the single amber accent is the bird logo in the search bar — everything else is native
+
 ## v0.11.0 — Unified launcher, configurable tools (Oct 3, 2026)
 
 - **One launcher surface**: the old Tab action mode is gone — ↓, Tab, or the list button opens the unified view with every tool as a compact row (⌘-numbered, so Cmd+1..5 jumps straight to a tool), then your favorites, then the last things you used. A new "On open" setting (General) picks between **Compact** (bare search bar) and **Full** (the unified view) whenever the launcher opens
