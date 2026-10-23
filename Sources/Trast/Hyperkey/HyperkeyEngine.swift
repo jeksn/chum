@@ -15,7 +15,15 @@ import TrastCore
 /// inserts the hyper modifiers into every event. Carbon hotkey matching and
 /// shortcut recorders read event flags, so ⌃⌥⇧⌘+key works for Trast's
 /// hotkeys and in any app in the session.
-final class HyperkeyEngine {
+///
+/// The tap and the HID monitor run on a DEDICATED thread's run loop, not the
+/// main one: a busy main thread delays tap callbacks past the system's tap
+/// timeout, which disables the tap (it is re-enabled on the timeout event,
+/// but under sustained load it keeps bouncing) and makes hyper detection lag
+/// for seconds — "hyper stops working while window commands (plain Carbon
+/// hotkeys) keep working". A private run loop keeps event latency independent
+/// of whatever the main thread is doing.
+final class HyperkeyEngine: @unchecked Sendable {
     static let shared = HyperkeyEngine()
 
     /// Marks events we post so the tap ignores its own output.
@@ -46,10 +54,19 @@ final class HyperkeyEngine {
     {"UserKeyMapping":[]}
     """
 
+    /// The thread that owns the event tap, the HID monitor, and the
+    /// engine-confined state below. Main only calls start()/stop(); the
+    /// lifecycle vars it touches are guarded by `stateLock`.
+    private var engineThread: Thread?
+    private var engineRunLoop: CFRunLoop?
+    private var teardownSignal: DispatchSemaphore?
+    private let stateLock = NSLock()
+
+    // Engine-thread-confined state — never touched from main while running.
+    private var capsIsDown = false
     private var eventTap: CFMachPort?
     private var runLoopSource: CFRunLoopSource?
     private var hidManager: IOHIDManager?
-    private var capsIsDown = false
     private var didApplyCapsRemap = false
     // kCGEventSourceStatePrivate is not exposed as a Swift enum case; its raw
     // value is ~0. A private source isolates synthetic events from the shared
@@ -58,13 +75,64 @@ final class HyperkeyEngine {
 
     private init() {}
 
-    var isRunning: Bool { eventTap != nil }
+    var isRunning: Bool {
+        stateLock.lock(); defer { stateLock.unlock() }
+        return engineThread != nil
+    }
 
     func start() {
         guard AppSettings.hyperKeyEnabled else { return }
-        guard eventTap == nil else { return }
+        stateLock.lock()
+        guard engineThread == nil else { stateLock.unlock(); return }
+        stateLock.unlock()
         // The tap consumes and rewrites events, which requires Accessibility.
         guard Accessibility.isTrusted else { return }
+
+        let ready = DispatchSemaphore(value: 0)
+        let teardown = DispatchSemaphore(value: 0)
+        let thread = Thread { [unowned self] in
+            self.runEngine(ready: ready, teardown: teardown)
+        }
+        thread.name = "TrastHyperkeyEngine"
+        thread.stackSize = 1 << 17
+
+        stateLock.lock()
+        engineThread = thread
+        teardownSignal = teardown
+        stateLock.unlock()
+        thread.start()
+
+        // Hold start() until the engine thread finished setup — stop() and
+        // isRunning would otherwise race a thread that is still building (or
+        // immediately failing) its tap.
+        _ = ready.wait(timeout: .now() + 2)
+    }
+
+    func stop() {
+        stateLock.lock()
+        guard let thread = engineThread else { stateLock.unlock(); return }
+        engineThread = nil
+        let signal = teardownSignal
+        teardownSignal = nil
+        let runLoop = engineRunLoop
+        stateLock.unlock()
+
+        // The thread may have already torn itself down (failed setup).
+        guard thread.isExecuting else { return }
+        if let runLoop { CFRunLoopStop(runLoop) }
+        // Give the thread time to unschedule/close/revert (hidutil can take
+        // a moment); on timeout the engine finishes its own teardown alone.
+        _ = signal?.wait(timeout: .now() + 2)
+    }
+
+    /// Engine thread: sets up the tap + HID monitor on this thread's run
+    /// loop, signals `ready`, then services events until CFRunLoopStop —
+    /// from stop() — ends the loop, and tears everything down.
+    private func runEngine(ready: DispatchSemaphore, teardown: DispatchSemaphore) {
+        let runLoop = CFRunLoopGetCurrent()
+        stateLock.lock()
+        engineRunLoop = runLoop
+        stateLock.unlock()
 
         let eventMask = CGEventMask(
             (1 << CGEventType.flagsChanged.rawValue)
@@ -85,12 +153,18 @@ final class HyperkeyEngine {
             eventsOfInterest: eventMask,
             callback: callback,
             userInfo: Unmanaged.passUnretained(self).toOpaque()
-        ) else { return }
+        ) else {
+            stateLock.lock()
+            engineRunLoop = nil
+            stateLock.unlock()
+            ready.signal()
+            teardown.signal()
+            return
+        }
 
         let source = CFMachPortCreateRunLoopSource(kCFAllocatorDefault, tap, 0)
-        CFRunLoopAddSource(CFRunLoopGetMain(), source, .commonModes)
+        CFRunLoopAddSource(runLoop, source, .defaultMode)
         CGEvent.tapEnable(tap: tap, enable: true)
-
         eventTap = tap
         runLoopSource = source
         startHIDMonitor()
@@ -99,14 +173,22 @@ final class HyperkeyEngine {
         // all — tear down so Caps Lock keeps working normally (the settings
         // UI shows the missing-permission warning).
         guard hidManager != nil else {
-            stop()
+            ready.signal()
+            tearDownEngine()
+            teardown.signal()
             return
         }
 
         applyCapsRemap()
+        ready.signal()
+        CFRunLoopRun()
+        tearDownEngine()
+        teardown.signal()
     }
 
-    func stop() {
+    /// Engine thread: reverts the remap, releases modifiers, and removes the
+    /// tap + HID monitor from this thread's run loop.
+    private func tearDownEngine() {
         if didApplyCapsRemap {
             didApplyCapsRemap = false
             Self.runHidutil(["property", "--set", Self.capsRemapRevertJSON])
@@ -119,20 +201,18 @@ final class HyperkeyEngine {
             CGEvent.tapEnable(tap: tap, enable: false)
         }
         if let source = runLoopSource {
-            CFRunLoopRemoveSource(CFRunLoopGetMain(), source, .commonModes)
+            CFRunLoopRemoveSource(CFRunLoopGetCurrent(), source, .defaultMode)
         }
         if let manager = hidManager {
-            IOHIDManagerUnscheduleFromRunLoop(manager, CFRunLoopGetMain(), CFRunLoopMode.commonModes.rawValue)
+            IOHIDManagerUnscheduleFromRunLoop(manager, CFRunLoopGetCurrent(), CFRunLoopMode.defaultMode.rawValue)
             IOHIDManagerClose(manager, IOOptionBits(kIOHIDOptionsTypeNone))
         }
         eventTap = nil
         runLoopSource = nil
         hidManager = nil
-    }
-
-    func restart() {
-        stop()
-        start()
+        stateLock.lock()
+        engineRunLoop = nil
+        stateLock.unlock()
     }
 
     /// Physical Caps Lock press/release only exists at the HID level.
@@ -151,13 +231,13 @@ final class HyperkeyEngine {
             engine.handleHIDValue(value)
         }
         IOHIDManagerRegisterInputValueCallback(manager, callback, Unmanaged.passUnretained(self).toOpaque())
-        IOHIDManagerScheduleWithRunLoop(manager, CFRunLoopGetMain(), CFRunLoopMode.commonModes.rawValue)
+        IOHIDManagerScheduleWithRunLoop(manager, CFRunLoopGetCurrent(), CFRunLoopMode.defaultMode.rawValue)
 
         // Opening keyboard devices for monitoring needs Input Monitoring;
         // prompt for it and try again on the next toggle if it was denied.
         guard IOHIDManagerOpen(manager, IOOptionBits(kIOHIDOptionsTypeNone)) == kIOReturnSuccess else {
             CGRequestListenEventAccess()
-            IOHIDManagerUnscheduleFromRunLoop(manager, CFRunLoopGetMain(), CFRunLoopMode.commonModes.rawValue)
+            IOHIDManagerUnscheduleFromRunLoop(manager, CFRunLoopGetCurrent(), CFRunLoopMode.defaultMode.rawValue)
             IOHIDManagerClose(manager, IOOptionBits(kIOHIDOptionsTypeNone))
             return
         }
