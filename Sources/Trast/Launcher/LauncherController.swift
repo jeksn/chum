@@ -68,12 +68,19 @@ final class LauncherController: NSObject, NSWindowDelegate {
     /// reset state first left the panel at bare-search height and the async
     /// observer pass then raced the signature/frame caches (see
     /// resizePanelToFit), leaving the panel stuck on a clipped search box.
+    /// The category the launcher showed when it was last closed — a plain
+    /// open (launcher hotkey) returns there instead of the main search.
+    private var lastShownCategory: LauncherViewModel.Category?
+
     func show(_ category: LauncherViewModel.Category? = nil) {
         target = WindowManipulator.frontmostWindow()
         viewModel.items = makeItems()
         viewModel.reset()
-        if let category {
-            viewModel.selectCategory(category)
+        // A tool hotkey passes its category; a plain open restores where
+        // the launcher was left last (main search resets to .all anyway).
+        let targetCategory = category ?? lastShownCategory
+        if let targetCategory, targetCategory != .all {
+            viewModel.selectCategory(targetCategory)
         }
 
         let panel = ensurePanel()
@@ -164,6 +171,7 @@ final class LauncherController: NSObject, NSWindowDelegate {
     }
 
     func close() {
+        lastShownCategory = viewModel.selectedCategory
         panel?.orderOut(nil)
     }
 
@@ -449,9 +457,13 @@ final class LauncherController: NSObject, NSWindowDelegate {
         if signature == lastLayoutSignature, lastTargetFrame != nil { return false }
 
         let fittingSize = hostingView.fittingSize
-        // The expanded Quick AI view sizes itself to the viewport; everything
-        // else caps at the previous 440.
-        let cap: CGFloat = viewModel.chatExpanded ? .greatestFiniteMagnitude : 440
+        // The sidebar tools size to their (taller) content and the expanded
+        // Quick AI view sizes itself to the viewport; everything else caps
+        // at 440.
+        let unbounded = viewModel.chatExpanded
+            || viewModel.selectedCategory == .scratchpad
+            || viewModel.selectedCategory == .aiChat
+        let cap: CGFloat = unbounded ? .greatestFiniteMagnitude : 440
         var height = min(fittingSize.height, cap)
         height = max(height, 52)
         guard let target = targetFrame(width: LauncherViewModel.panelWidth(for: viewModel.selectedCategory), height: height) else { return false }

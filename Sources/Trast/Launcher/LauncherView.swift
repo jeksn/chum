@@ -294,7 +294,7 @@ struct LauncherView: View {
     }
 
     private var scratchpad: some View {
-        HStack(spacing: 0) {
+        HStack(alignment: .top, spacing: 0) {
             notesSidebar
             Divider()
             noteEditor
@@ -330,7 +330,7 @@ struct LauncherView: View {
                 }
                 .padding(.vertical, 4)
             }
-            .frame(maxHeight: 330)
+            .frame(maxHeight: 450)
         }
         .frame(width: 220)
     }
@@ -375,7 +375,7 @@ struct LauncherView: View {
                 .font(.system(size: 14))
                 .scrollContentBackground(.hidden)
                 .focused($editorFocused)
-                .frame(height: 300)
+                .frame(height: 420)
                 .padding(.horizontal, 16)
                 .padding(.vertical, 12)
                 if noteText.isEmpty {
@@ -469,7 +469,7 @@ struct LauncherView: View {
     private var aiChatTool: some View {
         Group {
             if chatHasKey {
-                HStack(spacing: 0) {
+                HStack(alignment: .top, spacing: 0) {
                     chatSidebar
                     Divider()
                     VStack(spacing: 0) {
@@ -582,7 +582,7 @@ struct LauncherView: View {
                 }
                 .padding(.vertical, 4)
             }
-            .frame(maxHeight: 330)
+            .frame(maxHeight: 450)
         }
         .frame(width: 220)
     }
@@ -688,7 +688,7 @@ struct LauncherView: View {
             // Fixed at the normal size when compact (an empty chat keeps the
             // panel launcher-sized instead of collapsing), ~80% of the
             // viewport when expanded.
-            .frame(minHeight: 280, maxHeight: viewModel.chatExpanded ? 10000 : 280)
+            .frame(minHeight: 380, maxHeight: viewModel.chatExpanded ? 10000 : 380)
             .onChange(of: chatStore.discussions) { _ in
                 scrollToBottom(proxy)
             }
@@ -1000,6 +1000,7 @@ struct ChatDiscussionRowView: View {
             }
             Spacer(minLength: 0)
         }
+        .contentShape(Rectangle())
         .padding(.horizontal, 10)
         .padding(.vertical, 6)
         .background(
@@ -1075,6 +1076,7 @@ struct NoteRowView: View {
             }
             Spacer(minLength: 0)
         }
+        .contentShape(Rectangle())
         .padding(.horizontal, 10)
         .padding(.vertical, 6)
         .background(
