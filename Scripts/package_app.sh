@@ -84,6 +84,12 @@ fi
 if [[ -z "$SIGN_IDENTITY" ]]; then
   SIGN_IDENTITY="-"
 fi
+# A named identity that isn't in the keychain (e.g. after a rename, before the
+# new cert exists) falls back to ad-hoc instead of failing the build.
+if [[ "$SIGN_IDENTITY" != "-" ]] && ! security find-identity -v -p codesigning | grep -q "\"$SIGN_IDENTITY\""; then
+  echo "warning: signing identity \"$SIGN_IDENTITY\" not found in the keychain — signing ad-hoc"
+  SIGN_IDENTITY="-"
+fi
 codesign --force --sign "$SIGN_IDENTITY" "$APP_BUNDLE"
 if [[ "$SIGN_IDENTITY" == "-" ]]; then
   echo "Built $APP_BUNDLE (ad-hoc signed)"
