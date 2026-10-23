@@ -55,11 +55,21 @@ final class HyperkeyEngine: @unchecked Sendable {
     """
 
     /// The thread that owns the event tap, the HID monitor, and the
-    /// engine-confined state below. Main only calls start()/stop(); the
-    /// lifecycle vars it touches are guarded by `stateLock`.
+    /// engine-confined state below. Main only calls start()/stop()/restart();
+    /// the lifecycle vars it touches are guarded by `stateLock`.
     private var engineThread: Thread?
     private var engineRunLoop: CFRunLoop?
     private var teardownSignal: DispatchSemaphore?
+    private var setupSucceeded = false
+    /// Tap/HID activity timestamps — the watchdog's inputs. The HID monitor
+    /// sees raw keyboard input no matter what the session does (Secure
+    /// Input, dead taps), so recent HID activity with a silent tap means the
+    /// tap died silently.
+    private var lastTapEventAt: Date?
+    private var lastHIDEventAt: Date?
+    private var lastRestartAt: Date?
+    private var watchdogTimer: DispatchSourceTimer?
+    private var wakeObserver: NSObjectProtocol?
     private let stateLock = NSLock()
 
     // Engine-thread-confined state — never touched from main while running.
@@ -106,9 +116,26 @@ final class HyperkeyEngine: @unchecked Sendable {
         // isRunning would otherwise race a thread that is still building (or
         // immediately failing) its tap.
         _ = ready.wait(timeout: .now() + 2)
+        stateLock.lock()
+        let succeeded = setupSucceeded
+        stateLock.unlock()
+        if !succeeded {
+            // The thread tore itself down (tap creation failed, Input
+            // Monitoring denied): clear the lifecycle so the next start()
+            // can try again instead of pointing at a dead thread forever.
+            stateLock.lock()
+            engineThread = nil
+            teardownSignal = nil
+            stateLock.unlock()
+            return
+        }
+        startWatchdog()
+        startWakeObserver()
     }
 
     func stop() {
+        stopWatchdog()
+        stopWakeObserver()
         stateLock.lock()
         guard let thread = engineThread else { stateLock.unlock(); return }
         engineThread = nil
@@ -125,6 +152,13 @@ final class HyperkeyEngine: @unchecked Sendable {
         _ = signal?.wait(timeout: .now() + 2)
     }
 
+    /// Rebuilds the engine — the watchdog and wake self-heal path. Main
+    /// thread.
+    func restart() {
+        stop()
+        start()
+    }
+
     /// Engine thread: sets up the tap + HID monitor on this thread's run
     /// loop, signals `ready`, then services events until CFRunLoopStop —
     /// from stop() — ends the loop, and tears everything down.
@@ -132,6 +166,7 @@ final class HyperkeyEngine: @unchecked Sendable {
         let runLoop = CFRunLoopGetCurrent()
         stateLock.lock()
         engineRunLoop = runLoop
+        setupSucceeded = false
         stateLock.unlock()
 
         let eventMask = CGEventMask(
@@ -180,6 +215,9 @@ final class HyperkeyEngine: @unchecked Sendable {
         }
 
         applyCapsRemap()
+        stateLock.lock()
+        setupSucceeded = true
+        stateLock.unlock()
         ready.signal()
         CFRunLoopRun()
         tearDownEngine()
@@ -246,6 +284,7 @@ final class HyperkeyEngine: @unchecked Sendable {
     }
 
     private func handleHIDValue(_ value: IOHIDValue) {
+        markHIDEvent()
         let element = IOHIDValueGetElement(value)
         guard IOHIDElementGetUsagePage(element) == Self.keyboardUsagePage,
               IOHIDElementGetUsage(element) == Self.capsLockUsage
@@ -258,6 +297,7 @@ final class HyperkeyEngine: @unchecked Sendable {
     }
 
     private func handleEvent(type: CGEventType, event: CGEvent) -> CGEvent? {
+        markTapEvent()
         if type == .tapDisabledByTimeout || type == .tapDisabledByUserInput {
             if let tap = eventTap {
                 CGEvent.tapEnable(tap: tap, enable: true)
@@ -324,6 +364,87 @@ final class HyperkeyEngine: @unchecked Sendable {
         event.flags = flags
         event.setIntegerValueField(.eventSourceUserData, value: Self.syntheticTag)
         event.post(tap: .cgSessionEventTap)
+    }
+
+    // MARK: - Self-healing
+    //
+    // Taps die silently more often than they die loudly: wake-from-sleep
+    // frequently leaves a session tap receiving nothing (with no disabled
+    // notification delivered), and Secure-Input aftermath can too. The HID
+    // monitor is the ground truth — it sees raw keyboard input no matter
+    // what the session does — so recent typing that reached HID but not the
+    // tap means the tap is dead and the engine needs rebuilding.
+
+    private func markTapEvent() {
+        stateLock.lock()
+        lastTapEventAt = Date()
+        stateLock.unlock()
+    }
+
+    private func markHIDEvent() {
+        stateLock.lock()
+        lastHIDEventAt = Date()
+        stateLock.unlock()
+    }
+
+    private func startWatchdog() {
+        let timer = DispatchSource.makeTimerSource(queue: DispatchQueue.global(qos: .utility))
+        timer.schedule(deadline: .now() + 20, repeating: 20)
+        timer.setEventHandler { [weak self] in self?.checkHealth() }
+        timer.resume()
+        watchdogTimer = timer
+    }
+
+    private func stopWatchdog() {
+        watchdogTimer?.cancel()
+        watchdogTimer = nil
+    }
+
+    private func checkHealth() {
+        stateLock.lock()
+        guard engineThread != nil else { stateLock.unlock(); return }
+        let hid = lastHIDEventAt
+        let tap = lastTapEventAt
+        let lastRestart = lastRestartAt
+        stateLock.unlock()
+
+        // No recent typing: nothing to conclude — an idle machine with a
+        // dead tap looks identical to an idle machine with a live one.
+        guard let hid, Date().timeIntervalSince(hid) < 20 else { return }
+        let tapSilent = tap.map { Date().timeIntervalSince($0) > 20 } ?? true
+        guard tapSilent else { return }
+        // Rate-limit: while Secure Input is active (password prompts) taps
+        // legitimately receive nothing, and rebuilding won't help — don't
+        // restart-storm.
+        if let lastRestart, Date().timeIntervalSince(lastRestart) < 60 { return }
+
+        stateLock.lock()
+        lastRestartAt = Date()
+        stateLock.unlock()
+        NSLog("Trast Hyperkey: event tap stopped receiving events — rebuilding engine")
+        DispatchQueue.main.async { [weak self] in self?.restart() }
+    }
+
+    private func startWakeObserver() {
+        wakeObserver = NSWorkspace.shared.notificationCenter.addObserver(
+            forName: NSWorkspace.didWakeNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            // Give the session a moment to settle, then rebuild the engine.
+            DispatchQueue.main.asyncAfter(deadline: .now() + 2) { [weak self] in
+                guard let self, self.isRunning else { return }
+                NSLog("Trast Hyperkey: rebuilding engine after wake")
+                self.restart()
+            }
+        }
+    }
+
+    private func stopWakeObserver() {
+        if let wakeObserver {
+            NSWorkspace.shared.notificationCenter.removeObserver(wakeObserver)
+        }
+        wakeObserver = nil
     }
 
     /// Remaps Caps Lock to F18 at the HID driver level while the engine runs
