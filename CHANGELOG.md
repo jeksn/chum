@@ -1,5 +1,12 @@
 # Changelog
 
+## v1.0.0 — Chum (Oct 24, 2026)
+
+- **Renamed Trast → Chum**. New bundle id (`com.chum.app`), new `chum://` URL scheme, new signing identity — Chum is a fresh app to macOS, so grant Accessibility and Input Monitoring once on first use
+- Settings, hotkeys, commands, snippets, notes, chats, colors, and clipboard history all move over with the old app's data (one-time migration of the preferences domain and the Application Support folder)
+- The launcher keeps its shape: bird logo in the search bar, native crossfades between tools, and the sidebar Scratchpad and AI Chat from v0.12.0
+- CI signs with the Chum certificate; `package_app.sh` falls back to ad-hoc with a warning when the named identity is missing from the keychain instead of failing the build
+
 ## v0.12.0 — Sidebars, archive, Color Picker (Oct 23, 2026)
 
 - **Scratchpad and AI Chat sidebars**: both tools show a persistent list beside the editor/conversation (notes and previous discussions were a Cmd+P full-screen swap before) — click a row to open it, ⌘N makes a new one, and the panel widens and fades smoothly between the search bar and the tools
