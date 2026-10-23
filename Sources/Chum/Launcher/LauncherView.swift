@@ -87,18 +87,6 @@ struct LauncherView: View {
                     }
                 }
             }
-
-            if showsOptionsFooter {
-                Divider()
-                HStack {
-                    Spacer()
-                    Text("⌘K Options")
-                        .font(.caption)
-                        .foregroundStyle(.tertiary)
-                        .padding(.trailing, 16)
-                        .padding(.vertical, 6)
-                }
-            }
         }
         .frame(
             width: LauncherViewModel.panelWidth(for: viewModel.selectedCategory),
@@ -856,14 +844,6 @@ struct LauncherView: View {
 
     private var selectedID: String? {
         viewModel.filtered[safe: viewModel.selectedIndex]?.id
-    }
-
-    /// The ⌘K hint shows whenever a result row can have options — search
-    /// results, category lists, and the recents view, but not the actions
-    /// view or the scratchpad editor.
-    private var showsOptionsFooter: Bool {
-        viewModel.selectedCategory != .scratchpad
-            && !viewModel.filtered.isEmpty
     }
 
     private var shouldShowSectionHeader: Bool {
