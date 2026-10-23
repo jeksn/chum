@@ -1,14 +1,14 @@
-# Trast
+# Chum
 
 A Spotlight replacement for macOS.
 
-Press one hotkey and type. Trast searches everything at once — installed apps, window commands, clipboard history, snippets, and quick calculations — and acts on the top result. It's a native menu-bar app that works out of the box: a full set of window-management commands ships ready to use, clipboard history is on from the first launch, and every hotkey is optional but configurable.
+Press one hotkey and type. Chum searches everything at once — installed apps, window commands, clipboard history, snippets, and quick calculations — and acts on the top result. It's a native menu-bar app that works out of the box: a full set of window-management commands ships ready to use, clipboard history is on from the first launch, and every hotkey is optional but configurable.
 
 ## Why it over Spotlight
 
 - **One search bar, everything in it** — apps, window commands, your clipboard history, snippets, shortcuts, and math. No separate tools to learn
 - **Sane defaults** — 27 ready-made window commands (halves, thirds, quarters, sixths, Maximize, and more), clipboard history with pinned items, and a calculator that just answers; nothing to configure before it's useful
-- **Window management built in** — the same launcher runs your window layouts, with global hotkeys, a menu bar menu, and a `trast://` URL scheme for scripts
+- **Window management built in** — the same launcher runs your window layouts, with global hotkeys, a menu bar menu, and a `chum://` URL scheme for scripts
 - **System-wide text snippets** — type a keyword anywhere and it expands; the launcher also searches and copies them
 - **A hyper key** — Caps Lock becomes ⌃⌥⇧⌘, a modifier no other app uses, so hotkeys never conflict
 - **Native and lightweight** — SwiftUI menu-bar app, no Dock icon, no account, free
@@ -62,8 +62,8 @@ Press the launcher hotkey (Settings → General to record it) and type. Results 
 ## Hyper key
 
 - **Caps Lock → ⌃⌥⇧⌘** — hold Caps Lock as a "hyper" modifier and bind conflict-free hotkeys to your window commands and shortcuts. A lone Caps Lock tap does nothing (Settings → General → Hyper Key)
-- **✦ display** — hyper combos render as `✦K` in the command list, the Launcher, and Trast's built-in shortcut recorder; record them directly by holding Caps Lock while recording
-- **No lock, no LED** — while enabled, Caps Lock is remapped at the driver level (to F18) so the lock state and LED stay off; this reverts when the hyper key is disabled or Trast quits, and replaces any Caps Lock remap from System Settings while active
+- **✦ display** — hyper combos render as `✦K` in the command list, the Launcher, and Chum's built-in shortcut recorder; record them directly by holding Caps Lock while recording
+- **No lock, no LED** — while enabled, Caps Lock is remapped at the driver level (to F18) so the lock state and LED stay off; this reverts when the hyper key is disabled or Chum quits, and replaces any Caps Lock remap from System Settings while active
 - Requires Accessibility and Input Monitoring permissions; quit other Caps Lock remappers (e.g. Hyperkey.app) first — two active remappers on the same key conflict
 
 ## Other
@@ -84,8 +84,8 @@ Press the launcher hotkey (Settings → General to record it) and type. Results 
 
 ```bash
 git clone <repo-url>
-cd trast
-Scripts/package_app.sh        # release build → ./Trast.app
+cd chum
+Scripts/package_app.sh        # release build → ./Chum.app
 Scripts/install.sh --force    # copy to /Applications
 ```
 
@@ -96,11 +96,11 @@ Launch the app and grant **Accessibility** permission when prompted (System Sett
 Ad-hoc–signed builds lose their Accessibility grant on every rebuild (macOS keys the grant to the binary's signature hash). Fix it once by signing with a self-signed certificate:
 
 1. Keychain Access → **Certificate Assistant → Create a Certificate…**
-2. Name: `Trast` · Identity Type: **Self Signed Root** · Certificate Type: **Code Signing**
+2. Name: `Chum` · Identity Type: **Self Signed Root** · Certificate Type: **Code Signing**
 3. Export the identity and build:
 
 ```bash
-echo 'export CODESIGN_IDENTITY="Trast"' >> ~/.zshrc
+echo 'export CODESIGN_IDENTITY="Chum"' >> ~/.zshrc
 source ~/.zshrc
 Scripts/update.sh
 ```
@@ -136,9 +136,9 @@ Re-grant Accessibility one last time — after that, rebuilds keep the permissio
 ### URL scheme
 
 ```bash
-open "trast://apply?name=Left%20Half"   # apply a saved command by name
-open "trast://launcher"                 # open the launcher
-open "trast://command?position=center&relativeWidth=0.5&relativeHeight=0.5"
+open "chum://apply?name=Left%20Half"   # apply a saved command by name
+open "chum://launcher"                 # open the launcher
+open "chum://command?position=center&relativeWidth=0.5&relativeHeight=0.5"
 ```
 
 `command` params: `position` (`topLeft`…`bottomRight`), `absoluteWidth`/`absoluteHeight` (points), `relativeWidth`/`relativeHeight` (fraction of the display), and `absolute`/`relativeXOffset`/`YOffset`.
@@ -173,17 +173,17 @@ Scripts/update.sh
 - The launcher is a borderless, non-activating `NSPanel` that stays floating across all spaces; it captures the frontmost window on open so window commands target the right app
 - The usable area is the screen's `visibleFrame` inset by the edge gap; the anchor pins the window to it, offsets shift the frame, and % sizes are relative to that area
 - Windows are moved and resized through the macOS Accessibility API (`AXUIElement`)
-- The calculator is a pure recursive-descent parser (math, units, currency); exchange rates come from the ECB via frankfurter.dev, cached at `~/Library/Application Support/Trast/rates.json` and refreshed at most once a day
+- The calculator is a pure recursive-descent parser (math, units, currency); exchange rates come from the ECB via frankfurter.dev, cached at `~/Library/Application Support/Chum/rates.json` and refreshed at most once a day
 - Clipboard history polls `NSPasteboard.general.changeCount` every 0.5s and stores items in a versioned JSON file
 - Snippet expansion uses a listen-only `CGEvent` tap to detect keywords and injects expansion text via `CGEvent`. Template variables (`{{date}}`, `{{clipboard}}`, `{{time}}`) are resolved before injection
 - The hyper key remaps Caps Lock to F18 at the HID driver level (`hidutil`, so the lock state and LED stay off), detects press/release via IOKit HID, and rewrites session events to carry ⌃⌥⇧⌘ while held — so shortcut recorders and hotkey matching see the full combo in any app
-- Commands persist in `~/Library/Application Support/Trast/commands.json`; app/URL/folder shortcuts in `appShortcuts.json`; clipboard history in `clipboard.json`; snippets in `snippets.json`
+- Commands persist in `~/Library/Application Support/Chum/commands.json`; app/URL/folder shortcuts in `appShortcuts.json`; clipboard history in `clipboard.json`; snippets in `snippets.json`
 
 ## Development
 
 ```bash
 swift build                  # debug build
-swift run TrastTests    # test harness
+swift run ChumTests    # test harness
 Scripts/dev.sh               # debug build + relaunch app
 Scripts/package_app.sh       # release build + .app bundle
 ```

@@ -3,8 +3,8 @@ set -euo pipefail
 
 CONFIG="${1:-release}"
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-APP_NAME="Trast"
-BUNDLE_ID="com.trast.app"
+APP_NAME="Chum"
+BUNDLE_ID="com.chum.app"
 VERSION="$(git -C "$ROOT" describe --tags --abbrev=0 2>/dev/null | sed 's/^v//' || echo "0.0.0")"
 
 cd "$ROOT"
@@ -24,7 +24,7 @@ done
 python3 - "$APP_BUNDLE/Contents/MacOS/$APP_NAME" "$BIN_PATH" <<'PY'
 import re, sys
 bin_path, bin_dir = sys.argv[1], sys.argv[2].rstrip('/')
-resources = "/Applications/Trast.app/Contents/Resources"
+resources = "/Applications/Chum.app/Contents/Resources"
 data = bytearray(open(bin_path, 'rb').read())
 patched = 0
 for m in re.finditer(re.escape(bin_dir.encode()) + rb'/[A-Za-z0-9_]+_[A-Za-z0-9_]+\.bundle', data):
@@ -69,7 +69,7 @@ cat > "$APP_BUNDLE/Contents/Info.plist" <<PLIST
     <dict>
       <key>CFBundleURLName</key><string>$BUNDLE_ID</string>
       <key>CFBundleURLSchemes</key>
-      <array><string>trast</string></array>
+      <array><string>chum</string></array>
     </dict>
   </array>
   $ICON_KEY

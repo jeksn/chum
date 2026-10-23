@@ -2,33 +2,33 @@
 import PackageDescription
 
 let package = Package(
-    name: "Trast",
+    name: "Chum",
     platforms: [
         .macOS(.v13)
     ],
     products: [
-        .executable(name: "Trast", targets: ["Trast"])
+        .executable(name: "Chum", targets: ["Chum"])
     ],
     dependencies: [
         .package(url: "https://github.com/sindresorhus/KeyboardShortcuts", exact: "1.10.0")
     ],
     targets: [
         .target(
-            name: "TrastCore",
-            path: "Sources/TrastCore"
+            name: "ChumCore",
+            path: "Sources/ChumCore"
         ),
         .executableTarget(
-            name: "Trast",
+            name: "Chum",
             dependencies: [
-                "TrastCore",
+                "ChumCore",
                 .product(name: "KeyboardShortcuts", package: "KeyboardShortcuts")
             ],
-            path: "Sources/Trast"
+            path: "Sources/Chum"
         ),
         .executableTarget(
-            name: "TrastTests",
-            dependencies: ["TrastCore"],
-            path: "Tests/TrastTests"
+            name: "ChumTests",
+            dependencies: ["ChumCore"],
+            path: "Tests/ChumTests"
         )
     ],
     swiftLanguageModes: [.v5]

@@ -17,7 +17,7 @@ jobs:
           fetch-depth: 0
 
       - name: Run tests
-        run: swift run TrastTests
+        run: swift run ChumTests
 
       - name: Check secrets presence
         run: |
@@ -34,7 +34,7 @@ jobs:
             exit 0
           fi
           echo "$MACOS_SIGNING_P12" | base64 --decode > /tmp/cert.p12 || {
-            echo "FAILED: base64 decode - the MACOS_SIGNING_P12 secret must be the base64 output of: base64 -i trast.p12"
+            echo "FAILED: base64 decode - the MACOS_SIGNING_P12 secret must be the base64 output of: base64 -i chum.p12"
             exit 1
           }
           file /tmp/cert.p12
@@ -51,7 +51,7 @@ jobs:
             echo "FAILED: no valid code signing identity - the p12 must contain the certificate WITH its private key"
             exit 1
           }
-          echo "CODESIGN_IDENTITY=Trast" >> "$GITHUB_ENV"
+          echo "CODESIGN_IDENTITY=Chum" >> "$GITHUB_ENV"
           rm /tmp/cert.p12
 
       - name: Build app bundle

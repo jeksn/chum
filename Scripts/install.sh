@@ -2,10 +2,10 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-DEST="/Applications/Trast.app"
+DEST="/Applications/Chum.app"
 
-if [ ! -d "$ROOT/Trast.app" ]; then
-    echo "Trast.app not found - run Scripts/package_app.sh first" >&2
+if [ ! -d "$ROOT/Chum.app" ]; then
+    echo "Chum.app not found - run Scripts/package_app.sh first" >&2
     exit 1
 fi
 
@@ -15,6 +15,6 @@ if [ -d "$DEST" ] && [ "${1:-}" != "--force" ]; then
 fi
 
 rm -rf "$DEST"
-cp -R "$ROOT/Trast.app" "$DEST"
+cp -R "$ROOT/Chum.app" "$DEST"
 echo "Installed $DEST"
 echo "Note: launch-at-login works best from /Applications."
