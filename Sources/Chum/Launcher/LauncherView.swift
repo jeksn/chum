@@ -270,9 +270,8 @@ struct LauncherView: View {
 
     private var searchField: some View {
         HStack(spacing: 8) {
-            // The menu-bar bird logo, in beak amber — the one fixed accent.
-            Image(nsImage: StatusBarIcon.image)
-                .foregroundStyle(Theme.beak)
+            Image(systemName: "magnifyingglass")
+                .foregroundStyle(.secondary)
             TextField(viewModel.placeholder, text: $viewModel.query)
                 .textFieldStyle(.plain)
                 .font(.system(size: 20))
