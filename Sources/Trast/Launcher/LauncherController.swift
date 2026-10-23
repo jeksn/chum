@@ -480,15 +480,15 @@ final class LauncherController: NSObject, NSWindowDelegate {
         lastLayoutSignature = signature
         lastTargetFrame = target
 
-        // Animate only large jumps (mode switches) in sync with
-        // LauncherViewModel.modeAnimation: an instant setContentSize of that
-        // size lets the window's material layer draw square corners for a
-        // frame before SwiftUI re-applies the corner mask. Small deltas
-        // (search results growing/shrinking) snap, which reads as smooth
-        // incremental tracking and avoids animation pile-up while typing.
+        // Animate only large jumps (mode switches): an instant setContentSize
+        // of that size lets the window's material layer draw square corners
+        // for a frame before SwiftUI re-applies the corner mask. Small
+        // deltas (search results growing/shrinking) snap, which reads as
+        // smooth incremental tracking and avoids animation pile-up while
+        // typing. 0.22s matches the content's toolSwitch dissolve.
         if panel.isVisible, abs(target.height - panel.frame.height) > 60 || abs(target.width - panel.frame.width) > 60 {
             NSAnimationContext.runAnimationGroup { context in
-                context.duration = 0.18
+                context.duration = 0.22
                 context.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
                 panel.animator().setFrame(target, display: true)
             }

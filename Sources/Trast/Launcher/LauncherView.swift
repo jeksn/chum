@@ -32,7 +32,7 @@ struct LauncherView: View {
                     .transition(.toolSwitch)
             } else {
                 searchField
-                    .transition(.blurFade)
+                    .transition(.toolSwitch)
 
                 if !viewModel.filtered.isEmpty {
                     Divider()
@@ -107,7 +107,7 @@ struct LauncherView: View {
                 : nil,
             alignment: .top
         )
-        .animation(.easeInOut(duration: 0.18), value: viewModel.selectedCategory)
+        .animation(.easeInOut(duration: 0.22), value: viewModel.selectedCategory)
         .background(
             RoundedRectangle(cornerRadius: 12)
                 // Dark mode uses the thicker material - genuinely darker
@@ -883,7 +883,7 @@ private struct BlurFadeModifier: ViewModifier, Animatable {
     func body(content: Content) -> some View {
         content
             .opacity(1 - progress)
-            .blur(radius: progress * 6)
+            .blur(radius: progress * 10)
     }
 }
 
@@ -895,10 +895,12 @@ extension AnyTransition {
         )
     }
 
-    /// The tool-category switch: blur-fade plus a slight top-anchored scale,
-    /// in sync with the panel's 0.18s resize animation.
+    /// The tool-category switch: a strong blur dissolve, in sync with the
+    /// panel's 0.22s resize animation. Deliberately no scale — content
+    /// scaling on top of the window resize reads as glitchy; the window
+    /// growing/shrinking IS the size change.
     static var toolSwitch: AnyTransition {
-        blurFade.combined(with: .scale(scale: 0.97, anchor: .top))
+        blurFade
     }
 }
 
