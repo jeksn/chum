@@ -523,8 +523,16 @@ final class LauncherViewModel: ObservableObject {
                 hotkeyDisplays[name.rawValue] = hotkeyDisplay
             }
             let entry = SearchEntry(item: item, section: item.section, hotkeyDisplay: hotkeyDisplay)
-            return FuzzyMatch.Indexed(item: entry, text: item.searchText)
+            return FuzzyMatch.Indexed(item: entry, text: searchTextWithAlias(item))
         }
+    }
+
+    /// The item's search text plus its user alias, so partial alias matches
+    /// find the item through normal fuzzy ranking too.
+    private func searchTextWithAlias(_ item: LauncherItem) -> String {
+        let alias = AliasesStore.shared.alias(for: item.id)
+        guard !alias.isEmpty else { return item.searchText }
+        return item.searchText + "\n" + alias
     }
 
     func reset() {
@@ -706,6 +714,18 @@ final class LauncherViewModel: ObservableObject {
         // fuzzy-score commands, snippets, and clipboard items.
         let scoped = index.filter { includesInCategory($0.item) }
         var ranked: [LauncherItem] = FuzzyMatch.rankedIndexed(scoped, query: query).map { $0.item.item }
+
+        // An exact alias match beats every fuzzy interpretation: "sys" with
+        // an alias "sys" ranks the aliased item first, above System
+        // Information.
+        let lowered = trimmed.lowercased()
+        let aliasMatches = AliasesStore.shared.aliases
+        if !aliasMatches.isEmpty {
+            let exact = ranked.filter { aliasMatches[$0.id]?.lowercased() == lowered }
+            if !exact.isEmpty {
+                ranked = exact + ranked.filter { aliasMatches[$0.id]?.lowercased() != lowered }
+            }
+        }
 
         // Calculations (math, units, currency) show above other results in
         // the All category. Parsing is O(query length); the rates autoclosure

@@ -176,6 +176,17 @@ struct LauncherView: View {
                             .padding(.vertical, 4)
                         HotkeyRecorderView("Hotkey:", name: hotkeyName)
                     }
+
+                    Divider()
+                        .padding(.vertical, 4)
+                    HStack(spacing: 8) {
+                        Text("Alias:")
+                            .font(.system(size: 12))
+                            .foregroundStyle(.secondary)
+                        TextField("None", text: aliasBinding(for: item))
+                            .textFieldStyle(.plain)
+                            .font(.system(size: 12))
+                    }
                 }
                 .padding(12)
 
@@ -221,6 +232,15 @@ struct LauncherView: View {
             .contentShape(RoundedRectangle(cornerRadius: 6))
         }
         .buttonStyle(.plain)
+    }
+
+    /// The modal's alias field: saves live into the store (the store's
+    /// debounced notification re-indexes the launcher once per typing burst).
+    private func aliasBinding(for item: LauncherItem) -> Binding<String> {
+        Binding(
+            get: { AliasesStore.shared.alias(for: item.id) },
+            set: { AliasesStore.shared.setAlias($0, for: item.id) }
+        )
     }
 
     private func optionLabel(_ action: LauncherViewModel.OptionsAction) -> String {

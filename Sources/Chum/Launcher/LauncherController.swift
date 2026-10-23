@@ -17,6 +17,7 @@ final class LauncherController: NSObject, NSWindowDelegate {
     private var keyMonitor: Any?
     private var resizeCancellable: AnyCancellable?
     private var appsUpdateObserver: NSObjectProtocol?
+    private var aliasesUpdateObserver: NSObjectProtocol?
     private var lastTargetFrame: NSRect?
     private var resizeScheduled = false
     private var lastLayoutSignature: LayoutSignature?
@@ -37,6 +38,10 @@ final class LauncherController: NSObject, NSWindowDelegate {
         // row appears/disappears — both change the panel height.
         let chatInput: String
         let chatError: String?
+        // The options modal is an overlay that doesn't affect fittingSize;
+        // opening it on a short results list must grow the panel to the
+        // modal's minimum or the modal clips.
+        let optionsOpen: Bool
     }
 
     override private init() {
@@ -46,6 +51,16 @@ final class LauncherController: NSObject, NSWindowDelegate {
         // up the new items live, otherwise the next open reads the fresh cache.
         appsUpdateObserver = NotificationCenter.default.addObserver(
             forName: AppScanner.appsDidUpdate,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            guard let self, self.panel?.isVisible == true else { return }
+            self.viewModel.items = self.makeItems()
+        }
+        // Alias edits from the options modal re-index the launcher once per
+        // typing burst (AliasesStore debounces the notification).
+        aliasesUpdateObserver = NotificationCenter.default.addObserver(
+            forName: AliasesStore.aliasesDidUpdate,
             object: nil,
             queue: .main
         ) { [weak self] _ in
@@ -450,7 +465,8 @@ final class LauncherController: NSObject, NSWindowDelegate {
             transformerState: viewModel.transformerState,
             chatExpanded: viewModel.chatExpanded,
             chatInput: viewModel.chatInput,
-            chatError: viewModel.chatError
+            chatError: viewModel.chatError,
+            optionsOpen: viewModel.optionsItemID != nil
         )
         // The content height can't have changed (selection move, hover);
         // skip the fittingSize measurement, which forces a full layout pass.
@@ -466,6 +482,12 @@ final class LauncherController: NSObject, NSWindowDelegate {
         let cap: CGFloat = unbounded ? .greatestFiniteMagnitude : 440
         var height = min(fittingSize.height, cap)
         height = max(height, 52)
+        // The options modal overlays the content; its own height (~290pt
+        // with two actions, the hotkey row, and the alias field) exceeds a
+        // short results list, so the panel must grow while it is open.
+        if viewModel.optionsItemID != nil {
+            height = max(height, 320)
+        }
         guard let target = targetFrame(width: LauncherViewModel.panelWidth(for: viewModel.selectedCategory), height: height) else { return false }
         // Skip when the destination is unchanged: objectWillChange fires on
         // every keystroke and selection move, and restarting the easeInOut
