@@ -485,10 +485,11 @@ final class LauncherController: NSObject, NSWindowDelegate {
         // for a frame before SwiftUI re-applies the corner mask. Small
         // deltas (search results growing/shrinking) snap, which reads as
         // smooth incremental tracking and avoids animation pile-up while
-        // typing. 0.22s matches the content's toolSwitch dissolve.
+        // typing. 0.2s ease-in-out matches the content's toolSwitch
+        // crossfade (and NSAnimationContext's default duration).
         if panel.isVisible, abs(target.height - panel.frame.height) > 60 || abs(target.width - panel.frame.width) > 60 {
             NSAnimationContext.runAnimationGroup { context in
-                context.duration = 0.22
+                context.duration = 0.2
                 context.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
                 panel.animator().setFrame(target, display: true)
             }

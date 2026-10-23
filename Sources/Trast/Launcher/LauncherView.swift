@@ -107,7 +107,7 @@ struct LauncherView: View {
                 : nil,
             alignment: .top
         )
-        .animation(.easeInOut(duration: 0.22), value: viewModel.selectedCategory)
+        .animation(.easeInOut(duration: 0.2), value: viewModel.selectedCategory)
         .background(
             RoundedRectangle(cornerRadius: 12)
                 // Dark mode uses the thicker material - genuinely darker
@@ -872,35 +872,14 @@ struct LauncherView: View {
     }
 }
 
-private struct BlurFadeModifier: ViewModifier, Animatable {
-    var progress: Double
-
-    var animatableData: Double {
-        get { progress }
-        set { progress = newValue }
-    }
-
-    func body(content: Content) -> some View {
-        content
-            .opacity(1 - progress)
-            .blur(radius: progress * 10)
-    }
-}
-
 extension AnyTransition {
-    static var blurFade: AnyTransition {
-        .modifier(
-            active: BlurFadeModifier(progress: 1),
-            identity: BlurFadeModifier(progress: 0)
-        )
-    }
-
-    /// The tool-category switch: a strong blur dissolve, in sync with the
-    /// panel's 0.22s resize animation. Deliberately no scale — content
-    /// scaling on top of the window resize reads as glitchy; the window
-    /// growing/shrinking IS the size change.
+    /// The tool-category switch: a plain opacity crossfade — the native
+    /// macOS pattern for switching content panes. Deliberately no blur (a
+    /// live CI filter per frame stutters), no scale (the panel resize is
+    /// the one motion). 0.2s matches the panel's NSAnimationContext resize,
+    /// NSAnimationContext's own default duration.
     static var toolSwitch: AnyTransition {
-        blurFade
+        .opacity
     }
 }
 
