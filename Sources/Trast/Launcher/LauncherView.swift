@@ -270,7 +270,8 @@ struct LauncherView: View {
 
     private var searchField: some View {
         HStack(spacing: 8) {
-            Image(systemName: "magnifyingglass")
+            // The menu-bar bird logo, in beak amber — the one fixed accent.
+            Image(nsImage: StatusBarIcon.image)
                 .foregroundStyle(Theme.beak)
             TextField(viewModel.placeholder, text: $viewModel.query)
                 .textFieldStyle(.plain)
@@ -281,7 +282,7 @@ struct LauncherView: View {
             } label: {
                 Image(systemName: "arrow.right.to.line")
                     .font(.system(size: 13, weight: .semibold))
-                    .foregroundStyle(Theme.beak)
+                    .foregroundStyle(.secondary)
                     .frame(width: 28, height: 22)
                     .background(Capsule().fill(Color.secondary.opacity(0.15)))
             }
@@ -1157,7 +1158,7 @@ struct LauncherRowView: View {
                     Text("\(toolNumber)")
                         .font(.system(size: 9, weight: .bold))
                 }
-                .foregroundStyle(Theme.beak)
+                .foregroundStyle(.secondary)
                 .padding(.horizontal, 6)
                 .padding(.vertical, 3)
                 .background(Capsule().fill(Color.secondary.opacity(0.15)))
@@ -1165,7 +1166,7 @@ struct LauncherRowView: View {
             if isFavorite {
                 Image(systemName: "star.fill")
                     .font(.system(size: 10))
-                    .foregroundStyle(Theme.beak)
+                    .foregroundStyle(.secondary)
             }
             if let hotkeyDisplay {
                 Text(hotkeyDisplay)
@@ -1219,11 +1220,10 @@ struct LauncherRowView: View {
         return nil
     }
 
-    /// Row icon color: the calculator result carries the amber accent
-    /// (a small bright glyph, like the beak); everything else stays muted.
+    /// Row icon color: everything stays muted; the only amber accent in the
+    /// app is the search-bar logo.
     private var iconForeground: Color {
-        if case .calculatorResult = item { return Theme.beak }
-        return .secondary
+        .secondary
     }
 
     private var rowBackground: Color {
