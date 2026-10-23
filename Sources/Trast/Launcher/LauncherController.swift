@@ -454,7 +454,7 @@ final class LauncherController: NSObject, NSWindowDelegate {
         let cap: CGFloat = viewModel.chatExpanded ? .greatestFiniteMagnitude : 440
         var height = min(fittingSize.height, cap)
         height = max(height, 52)
-        guard let target = targetFrame(width: Self.panelWidth(for: viewModel.selectedCategory), height: height) else { return false }
+        guard let target = targetFrame(width: LauncherViewModel.panelWidth(for: viewModel.selectedCategory), height: height) else { return false }
         // Skip when the destination is unchanged: objectWillChange fires on
         // every keystroke and selection move, and restarting the easeInOut
         // resize from a mid-flight frame makes the panel visibly stutter.
@@ -484,15 +484,6 @@ final class LauncherController: NSObject, NSWindowDelegate {
             panel.setFrame(target, display: true)
         }
         return false
-    }
-
-    /// The panel width per category: the two sidebar tools get a wider
-    /// panel so the sidebar doesn't squeeze the editor/conversation.
-    private static func panelWidth(for category: LauncherViewModel.Category) -> CGFloat {
-        switch category {
-        case .scratchpad, .aiChat: return 840
-        default: return 640
-        }
     }
 
     private func targetFrame(width: CGFloat, height: CGFloat) -> NSRect? {

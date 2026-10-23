@@ -36,17 +36,22 @@ public struct ChatDiscussion: Identifiable, Hashable, Codable, Sendable {
     public var messages: [ChatMessage]
     public var createdAt: Date
     public var updatedAt: Date
+    /// Archived discussions leave the active sidebar list; the launcher's
+    /// sidebar Archive toggle lists them.
+    public var isArchived: Bool
 
     public init(
         id: UUID = UUID(),
         messages: [ChatMessage] = [],
         createdAt: Date = Date(),
-        updatedAt: Date = Date()
+        updatedAt: Date = Date(),
+        isArchived: Bool = false
     ) {
         self.id = id
         self.messages = messages
         self.createdAt = createdAt
         self.updatedAt = updatedAt
+        self.isArchived = isArchived
     }
 
     /// One-line title for the history list: the first user message,
@@ -64,7 +69,7 @@ public struct ChatDiscussion: Identifiable, Hashable, Codable, Sendable {
     }
 
     private enum CodingKeys: String, CodingKey {
-        case id, messages, createdAt, updatedAt
+        case id, messages, createdAt, updatedAt, isArchived
     }
 
     public init(from decoder: Decoder) throws {
@@ -73,5 +78,6 @@ public struct ChatDiscussion: Identifiable, Hashable, Codable, Sendable {
         messages = try container.decodeIfPresent([ChatMessage].self, forKey: .messages) ?? []
         createdAt = try container.decodeIfPresent(Date.self, forKey: .createdAt) ?? Date()
         updatedAt = try container.decodeIfPresent(Date.self, forKey: .updatedAt) ?? createdAt
+        isArchived = try container.decodeIfPresent(Bool.self, forKey: .isArchived) ?? false
     }
 }

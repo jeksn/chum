@@ -8,17 +8,22 @@ public struct Note: Identifiable, Hashable, Codable, Sendable {
     public var text: String
     public var createdAt: Date
     public var updatedAt: Date
+    /// Archived notes leave the active sidebar list; the launcher's sidebar
+    /// Archive toggle lists them.
+    public var isArchived: Bool
 
     public init(
         id: UUID = UUID(),
         text: String = "",
         createdAt: Date = Date(),
-        updatedAt: Date = Date()
+        updatedAt: Date = Date(),
+        isArchived: Bool = false
     ) {
         self.id = id
         self.text = text
         self.createdAt = createdAt
         self.updatedAt = updatedAt
+        self.isArchived = isArchived
     }
 
     /// One-line excerpt for list rows: the first non-empty line, whitespace
@@ -34,7 +39,7 @@ public struct Note: Identifiable, Hashable, Codable, Sendable {
     }
 
     private enum CodingKeys: String, CodingKey {
-        case id, text, createdAt, updatedAt
+        case id, text, createdAt, updatedAt, isArchived
     }
 
     public init(from decoder: Decoder) throws {
@@ -43,6 +48,7 @@ public struct Note: Identifiable, Hashable, Codable, Sendable {
         text = try container.decodeIfPresent(String.self, forKey: .text) ?? ""
         createdAt = try container.decodeIfPresent(Date.self, forKey: .createdAt) ?? Date()
         updatedAt = try container.decodeIfPresent(Date.self, forKey: .updatedAt) ?? createdAt
+        isArchived = try container.decodeIfPresent(Bool.self, forKey: .isArchived) ?? false
     }
 
     public func encode(to encoder: Encoder) throws {
@@ -51,5 +57,6 @@ public struct Note: Identifiable, Hashable, Codable, Sendable {
         try container.encode(text, forKey: .text)
         try container.encode(createdAt, forKey: .createdAt)
         try container.encode(updatedAt, forKey: .updatedAt)
+        try container.encode(isArchived, forKey: .isArchived)
     }
 }

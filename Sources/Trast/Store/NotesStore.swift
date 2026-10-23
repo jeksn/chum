@@ -39,9 +39,21 @@ final class NotesStore: ObservableObject {
     }
 
     /// The note the scratchpad editor shows; falls back to the most recently
-    /// updated note when no explicit selection is persisted.
+    /// updated ACTIVE note when no explicit selection is persisted. The
+    /// editor never edits an archived note.
     var currentNote: Note? {
-        notes.first { $0.id == currentNoteID } ?? notes.first
+        notes.first { $0.id == currentNoteID && !$0.isArchived }
+            ?? notes.first { !$0.isArchived }
+    }
+
+    /// The active (non-archived) notes for the sidebar list.
+    var activeNotes: [Note] {
+        notes.filter { !$0.isArchived }
+    }
+
+    /// Archived notes for the sidebar's Archive list.
+    var archivedNotes: [Note] {
+        notes.filter { $0.isArchived }
     }
 
     /// Typing in the editor lands here once per keystroke; only the disk
@@ -63,21 +75,47 @@ final class NotesStore: ObservableObject {
         return note.id
     }
 
-    /// Opens a note from the list in the editor.
+    /// Opens a note from the sidebar in the editor.
     func open(id: UUID) {
-        guard notes.contains(where: { $0.id == id }) else { return }
+        guard notes.contains(where: { $0.id == id && !$0.isArchived }) else { return }
         currentNoteID = id
         persistCurrentNote()
     }
 
+    /// Archives a note; if it was current, the editor falls back to the most
+    /// recently updated remaining active note — and archiving the last one
+    /// produces a fresh empty note, so the editor always has a current note.
+    func archive(id: UUID) {
+        setArchived(true, id: id)
+    }
+
+    func unarchive(id: UUID) {
+        setArchived(false, id: id)
+    }
+
+    private func setArchived(_ archived: Bool, id: UUID) {
+        guard let index = notes.firstIndex(where: { $0.id == id }) else { return }
+        notes[index].isArchived = archived
+        if archived, currentNoteID == id {
+            currentNoteID = nil
+        }
+        if archived, activeNotes.isEmpty {
+            let note = Note()
+            notes.insert(note, at: 0)
+            currentNoteID = note.id
+        }
+        persistCurrentNote()
+        save()
+    }
+
     /// Deletes a note; if it was current, the editor falls back to the most
-    /// recently updated remaining note. Deleting the last one produces a
-    /// fresh empty note.
+    /// recently updated remaining active note. Deleting the last active one
+    /// produces a fresh empty note (archived notes never become current).
     func delete(id: UUID) {
         notes.removeAll { $0.id == id }
         if currentNoteID == id { currentNoteID = nil }
-        if notes.isEmpty {
-            notes = [Note()]
+        if activeNotes.isEmpty {
+            notes.insert(Note(), at: 0)
             currentNoteID = notes[0].id
         }
         persistCurrentNote()

@@ -41,5 +41,13 @@ struct ChatModelTests {
             let long = ChatDiscussion(messages: [ChatMessage(role: .user, text: String(repeating: "x", count: 100))])
             t.check(long.title.count == 80, "capped at 80 chars")
         }
+
+        t.run("ChatModel.isArchivedDefaultsAndRoundTrip") {
+            let legacy = try JSONDecoder().decode(ChatDiscussion.self, from: Data("{\"messages\":[]}".utf8))
+            t.check(legacy.isArchived == false, "missing isArchived should decode as active")
+            let archived = ChatDiscussion(messages: [ChatMessage(role: .user, text: "hi")], isArchived: true)
+            let decoded = try JSONDecoder().decode(ChatDiscussion.self, from: try JSONEncoder().encode(archived))
+            t.check(decoded.isArchived == true, "archived flag should round-trip")
+        }
     }
 }

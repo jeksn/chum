@@ -37,5 +37,13 @@ enum NoteCodableTests {
             t.check(Note(text: long).excerpt.count == 80, "capped at 80 chars, got \(Note(text: long).excerpt.count)")
             t.check(Note(text: "多行\nテキスト").excerpt == "多行", "non-latin text")
         }
+
+        t.run("Note.isArchivedDefaultsAndRoundTrip") {
+            let legacy = try JSONDecoder().decode(Note.self, from: Data("{\"text\":\"old\"}".utf8))
+            t.check(legacy.isArchived == false, "missing isArchived should decode as active")
+            let archived = Note(text: "gone", isArchived: true)
+            let decoded = try JSONDecoder().decode(Note.self, from: try JSONEncoder().encode(archived))
+            t.check(decoded.isArchived == true, "archived flag should round-trip")
+        }
     }
 }

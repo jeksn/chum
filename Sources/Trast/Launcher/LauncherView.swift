@@ -23,13 +23,13 @@ struct LauncherView: View {
         VStack(spacing: 0) {
             if viewModel.selectedCategory == .textTransformer {
                 transformerTool
-                    .transition(.blurFade)
+                    .transition(.toolSwitch)
             } else if viewModel.selectedCategory == .aiChat {
                 aiChatTool
-                    .transition(.blurFade)
+                    .transition(.toolSwitch)
             } else if viewModel.selectedCategory == .scratchpad {
                 scratchpad
-                    .transition(.blurFade)
+                    .transition(.toolSwitch)
             } else {
                 searchField
                     .transition(.blurFade)
@@ -101,12 +101,13 @@ struct LauncherView: View {
             }
         }
         .frame(
-            width: 640,
+            width: LauncherViewModel.panelWidth(for: viewModel.selectedCategory),
             height: viewModel.selectedCategory == .aiChat && viewModel.chatExpanded
                 ? chatExpandedHeight
                 : nil,
             alignment: .top
         )
+        .animation(.easeInOut(duration: 0.18), value: viewModel.selectedCategory)
         .background(
             RoundedRectangle(cornerRadius: 12)
                 // Dark mode uses the thicker material - genuinely darker
@@ -306,26 +307,58 @@ struct LauncherView: View {
     }
 
     /// The persistent notes sidebar — the old Cmd+P notes list, now always
-    /// visible beside the editor. Click a row to open the note.
+    /// visible beside the editor. Click a row to open the note; right-click
+    /// archives or deletes. The header toggles between notes and archive.
     private var notesSidebar: some View {
-        ScrollView {
-            LazyVStack(spacing: 0) {
-                ForEach(notesStore.notes) { note in
-                    NoteRowView(
-                        note: note,
-                        isSelected: note.id == notesStore.currentNote?.id,
-                        isHovered: viewModel.hoveredID == note.id.uuidString
-                    )
-                    .id(note.id)
-                    .onHover { hovering in
-                        viewModel.setHovered(note.id.uuidString, hovering: hovering)
+        VStack(spacing: 0) {
+            sidebarHeader(activeTitle: "Notes", showsArchive: $viewModel.notesSidebarShowsArchive)
+            Divider()
+            ScrollView {
+                LazyVStack(spacing: 0) {
+                    if viewModel.notesSidebarShowsArchive {
+                        if notesStore.archivedNotes.isEmpty {
+                            sidebarEmpty("Nothing archived")
+                        }
+                        ForEach(notesStore.archivedNotes) { note in
+                            noteRow(note, archived: true)
+                        }
+                    } else {
+                        ForEach(notesStore.activeNotes) { note in
+                            noteRow(note, archived: false)
+                        }
                     }
-                    .onTapGesture { viewModel.openNote(note.id) }
                 }
+                .padding(.vertical, 4)
             }
-            .padding(.vertical, 4)
+            .frame(maxHeight: 330)
         }
-        .frame(width: 220).frame(maxHeight: 340)
+        .frame(width: 220)
+    }
+
+    private func noteRow(_ note: Note, archived: Bool) -> some View {
+        Button {
+            guard !archived else { return }
+            viewModel.openNote(note.id)
+        } label: {
+            NoteRowView(
+                note: note,
+                isSelected: !archived && note.id == notesStore.currentNote?.id,
+                isHovered: viewModel.hoveredID == note.id.uuidString
+            )
+        }
+        .buttonStyle(.plain)
+        .contextMenu {
+            if archived {
+                Button("Unarchive") { viewModel.unarchiveNote(note.id) }
+            } else {
+                Button("Archive") { viewModel.archiveNote(note.id) }
+            }
+            Button("Delete", role: .destructive) { viewModel.deleteNote(note.id) }
+        }
+        .id(note.id)
+        .onHover { hovering in
+            viewModel.setHovered(note.id.uuidString, hovering: hovering)
+        }
     }
 
     private var noteText: String {
@@ -522,33 +555,99 @@ struct LauncherView: View {
     }
 
     /// The persistent discussions sidebar — the old Cmd+P history list, now
-    /// always visible beside the conversation. Click a row to open it.
+    /// always visible beside the conversation. Click a row to open it;
+    /// right-click archives or deletes. The header toggles between chats
+    /// and archive.
     private var chatSidebar: some View {
-        ScrollView {
-            LazyVStack(spacing: 0) {
-                if chatStore.discussions.isEmpty {
-                    Text("No discussions yet")
-                        .font(.caption)
-                        .foregroundStyle(.tertiary)
-                        .padding(16)
-                }
-                ForEach(Array(chatStore.discussions.enumerated()), id: \.element.id) { index, discussion in
-                    ChatDiscussionRowView(
-                        discussion: discussion,
-                        isSelected: discussion.id == chatStore.currentDiscussion?.id,
-                        isHovered: viewModel.hoveredID == discussion.id.uuidString,
-                        onDelete: { viewModel.deleteDiscussion(at: index) }
-                    )
-                    .id(discussion.id)
-                    .onHover { hovering in
-                        viewModel.setHovered(discussion.id.uuidString, hovering: hovering)
+        VStack(spacing: 0) {
+            sidebarHeader(activeTitle: "Chats", showsArchive: $viewModel.chatsSidebarShowsArchive)
+            Divider()
+            ScrollView {
+                LazyVStack(spacing: 0) {
+                    if viewModel.chatsSidebarShowsArchive {
+                        if chatStore.archivedDiscussions.isEmpty {
+                            sidebarEmpty("Nothing archived")
+                        }
+                        ForEach(chatStore.archivedDiscussions) { discussion in
+                            discussionRow(discussion, archived: true)
+                        }
+                    } else {
+                        if chatStore.activeDiscussions.isEmpty {
+                            sidebarEmpty("No discussions yet")
+                        }
+                        ForEach(chatStore.activeDiscussions) { discussion in
+                            discussionRow(discussion, archived: false)
+                        }
                     }
-                    .onTapGesture { viewModel.openSelectedDiscussionID(discussion.id) }
                 }
+                .padding(.vertical, 4)
             }
-            .padding(.vertical, 4)
+            .frame(maxHeight: 330)
         }
-        .frame(width: 220).frame(maxHeight: 340)
+        .frame(width: 220)
+    }
+
+    private func discussionRow(_ discussion: ChatDiscussion, archived: Bool) -> some View {
+        Button {
+            guard !archived else { return }
+            viewModel.openSelectedDiscussionID(discussion.id)
+        } label: {
+            ChatDiscussionRowView(
+                discussion: discussion,
+                isSelected: !archived && discussion.id == chatStore.currentDiscussion?.id,
+                isHovered: viewModel.hoveredID == discussion.id.uuidString
+            )
+        }
+        .buttonStyle(.plain)
+        .contextMenu {
+            if archived {
+                Button("Unarchive") { viewModel.unarchiveDiscussion(discussion.id) }
+            } else {
+                Button("Archive") { viewModel.archiveDiscussion(discussion.id) }
+            }
+            Button("Delete", role: .destructive) { viewModel.deleteDiscussionByID(discussion.id) }
+        }
+        .id(discussion.id)
+        .onHover { hovering in
+            viewModel.setHovered(discussion.id.uuidString, hovering: hovering)
+        }
+    }
+
+    /// The Notes/Chats | Archive segmented toggle at the top of a tool
+    /// sidebar.
+    private func sidebarHeader(activeTitle: String, showsArchive: Binding<Bool>) -> some View {
+        HStack(spacing: 4) {
+            sidebarHeaderTab(activeTitle, selected: !showsArchive.wrappedValue) {
+                showsArchive.wrappedValue = false
+            }
+            sidebarHeaderTab("Archive", selected: showsArchive.wrappedValue) {
+                showsArchive.wrappedValue = true
+            }
+            Spacer(minLength: 0)
+        }
+        .padding(.horizontal, 8)
+        .padding(.vertical, 8)
+    }
+
+    private func sidebarHeaderTab(_ title: String, selected: Bool, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Text(title)
+                .font(.system(size: 11, weight: selected ? .semibold : .regular))
+                .foregroundStyle(selected ? Color.primary : Color.secondary)
+                .padding(.horizontal, 10)
+                .padding(.vertical, 3)
+                .background(
+                    Capsule().fill(selected ? Color.accentColor.opacity(0.18) : Color.clear)
+                )
+        }
+        .buttonStyle(.plain)
+    }
+
+    private func sidebarEmpty(_ text: String) -> some View {
+        Text(text)
+            .font(.caption)
+            .foregroundStyle(.tertiary)
+            .padding(16)
     }
 
     private func copyTranscript() {
@@ -794,6 +893,12 @@ extension AnyTransition {
             identity: BlurFadeModifier(progress: 0)
         )
     }
+
+    /// The tool-category switch: blur-fade plus a slight top-anchored scale,
+    /// in sync with the panel's 0.18s resize animation.
+    static var toolSwitch: AnyTransition {
+        blurFade.combined(with: .scale(scale: 0.97, anchor: .top))
+    }
 }
 
 extension Date {
@@ -877,32 +982,28 @@ struct ChatDiscussionRowView: View {
     let discussion: ChatDiscussion
     let isSelected: Bool
     var isHovered = false
-    let onDelete: () -> Void
 
     var body: some View {
-        HStack(spacing: 10) {
-            VStack(alignment: .leading, spacing: 2) {
+        HStack(spacing: 8) {
+            Image(systemName: "bubble.left")
+                .font(.system(size: 11))
+                .foregroundStyle(.secondary)
+                .frame(width: 16, height: 16)
+            VStack(alignment: .leading, spacing: 1) {
                 Text(discussion.title)
-                    .font(.system(size: 14, weight: .medium))
+                    .font(.system(size: 12, weight: .medium))
                     .lineLimit(1)
                 Text(discussion.updatedAt.rowDateLabel)
-                    .font(.caption)
+                    .font(.caption2)
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
             }
-            Spacer()
-            Button(action: onDelete) {
-                Image(systemName: "trash")
-                    .font(.system(size: 11))
-                    .foregroundStyle(Color.secondary)
-            }
-            .buttonStyle(.plain)
-            .help("Delete discussion")
+            Spacer(minLength: 0)
         }
-        .padding(.horizontal, 16)
-        .padding(.vertical, 8)
+        .padding(.horizontal, 10)
+        .padding(.vertical, 6)
         .background(
-            RoundedRectangle(cornerRadius: 6)
+            RoundedRectangle(cornerRadius: 5)
                 .fill(rowBackground)
         )
         .padding(.horizontal, 6)
@@ -958,25 +1059,26 @@ struct NoteRowView: View {
     var isHovered = false
 
     var body: some View {
-        HStack(spacing: 12) {
+        HStack(spacing: 8) {
             Image(systemName: "note.text")
+                .font(.system(size: 11))
                 .foregroundStyle(.secondary)
-                .frame(width: 22, height: 22)
-            VStack(alignment: .leading, spacing: 2) {
+                .frame(width: 16, height: 16)
+            VStack(alignment: .leading, spacing: 1) {
                 Text(note.excerpt.isEmpty ? "Empty note" : note.excerpt)
-                    .font(.system(size: 14, weight: .medium))
+                    .font(.system(size: 12, weight: .medium))
                     .lineLimit(1)
                 Text(note.updatedAt.rowDateLabel)
-                    .font(.caption)
+                    .font(.caption2)
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
             }
-            Spacer()
+            Spacer(minLength: 0)
         }
-        .padding(.horizontal, 16)
-        .padding(.vertical, 8)
+        .padding(.horizontal, 10)
+        .padding(.vertical, 6)
         .background(
-            RoundedRectangle(cornerRadius: 6)
+            RoundedRectangle(cornerRadius: 5)
                 .fill(rowBackground)
         )
         .padding(.horizontal, 6)

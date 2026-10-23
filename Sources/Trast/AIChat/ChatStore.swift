@@ -28,9 +28,21 @@ final class ChatStore: ObservableObject {
         load()
     }
 
-    /// The open discussion; falls back to the most recently updated.
+    /// The open discussion; falls back to the most recently updated ACTIVE
+    /// discussion — an archived discussion never auto-opens.
     var currentDiscussion: ChatDiscussion? {
-        discussions.first { $0.id == currentDiscussionID } ?? discussions.first
+        discussions.first { $0.id == currentDiscussionID && !$0.isArchived }
+            ?? discussions.first { !$0.isArchived }
+    }
+
+    /// The active (non-archived) discussions for the sidebar list.
+    var activeDiscussions: [ChatDiscussion] {
+        discussions.filter { !$0.isArchived }
+    }
+
+    /// Archived discussions for the sidebar's Archive list.
+    var archivedDiscussions: [ChatDiscussion] {
+        discussions.filter { $0.isArchived }
     }
 
     /// The messages of the open discussion (empty for a fresh tool).
@@ -54,11 +66,31 @@ final class ChatStore: ObservableObject {
         save()
     }
 
-    /// Opens a discussion from the history dialog.
+    /// Opens a discussion from the sidebar.
     func open(id: UUID) {
-        guard discussions.contains(where: { $0.id == id }) else { return }
+        guard discussions.contains(where: { $0.id == id && !$0.isArchived }) else { return }
         currentDiscussionID = id
         persistCurrentDiscussionID()
+    }
+
+    /// Archives a discussion; if it was current, the conversation falls back
+    /// to the most recently updated remaining active one.
+    func archive(id: UUID) {
+        setArchived(true, id: id)
+    }
+
+    func unarchive(id: UUID) {
+        setArchived(false, id: id)
+    }
+
+    private func setArchived(_ archived: Bool, id: UUID) {
+        guard let index = discussions.firstIndex(where: { $0.id == id }) else { return }
+        discussions[index].isArchived = archived
+        if archived, currentDiscussionID == id {
+            currentDiscussionID = nil
+        }
+        persistCurrentDiscussionID()
+        save()
     }
 
     /// Starts a fresh, empty discussion.

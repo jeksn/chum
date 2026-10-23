@@ -472,6 +472,10 @@ final class LauncherViewModel: ObservableObject {
     /// the viewport for long conversations.
     @Published var chatExpanded = false
 
+    /// The sidebar Archive toggles: notes/chats list vs the archived items.
+    @Published var notesSidebarShowsArchive = false
+    @Published var chatsSidebarShowsArchive = false
+
     /// The Text Transformer tool captures the frontmost app's selection on
     /// entry and previews transformations over it.
     enum TransformerState {
@@ -548,6 +552,19 @@ final class LauncherViewModel: ObservableObject {
         focusToken = UUID()
     }
 
+    /// Sidebar context-menu actions.
+    func archiveNote(_ id: UUID) {
+        NotesStore.shared.archive(id: id)
+    }
+
+    func unarchiveNote(_ id: UUID) {
+        NotesStore.shared.unarchive(id: id)
+    }
+
+    func deleteNote(_ id: UUID) {
+        NotesStore.shared.delete(id: id)
+    }
+
     // MARK: - AI Chat
 
     func createNewChatDiscussion() {
@@ -558,6 +575,19 @@ final class LauncherViewModel: ObservableObject {
     func openSelectedDiscussionID(_ id: UUID) {
         ChatStore.shared.open(id: id)
         focusToken = UUID()
+    }
+
+    /// Sidebar context-menu actions.
+    func archiveDiscussion(_ id: UUID) {
+        ChatStore.shared.archive(id: id)
+    }
+
+    func unarchiveDiscussion(_ id: UUID) {
+        ChatStore.shared.unarchive(id: id)
+    }
+
+    func deleteDiscussionByID(_ id: UUID) {
+        ChatStore.shared.delete(id: id)
     }
 
     /// Sends the composer draft. Keyboard dispatch lives in the
@@ -580,11 +610,6 @@ final class LauncherViewModel: ObservableObject {
             }
             chatSending = false
         }
-    }
-
-    func deleteDiscussion(at index: Int) {
-        guard let discussion = ChatStore.shared.discussions[safe: index] else { return }
-        ChatStore.shared.delete(id: discussion.id)
     }
 
     // MARK: - Text Transformer
@@ -786,6 +811,17 @@ final class LauncherViewModel: ObservableObject {
         selectCategory(cases[index])
     }
 
+    /// The panel/content width per category: the two sidebar tools get a
+    /// wider panel so the sidebar doesn't squeeze the editor/conversation.
+    /// Single source of truth — the controller sizes the NSPanel with it and
+    /// the view frames its content with it.
+    static func panelWidth(for category: Category) -> CGFloat {
+        switch category {
+        case .scratchpad, .aiChat: return 840
+        default: return 640
+        }
+    }
+
     func selectCategory(_ category: Category) {
         selectedCategory = category
         selectedIndex = 0
@@ -793,6 +829,10 @@ final class LauncherViewModel: ObservableObject {
         focusToken = UUID()
         if category == .aiChat {
             chatExpanded = false
+            chatsSidebarShowsArchive = false
+        }
+        if category == .scratchpad {
+            notesSidebarShowsArchive = false
         }
         if category == .textTransformer {
             LauncherController.shared.enterTextTransformer()
