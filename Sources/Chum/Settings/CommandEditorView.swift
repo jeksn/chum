@@ -262,8 +262,8 @@ struct PreviewDiagram: View {
                     .fill(Color.secondary.opacity(0.1))
                     .overlay(RoundedRectangle(cornerRadius: 6).strokeBorder(Color.secondary.opacity(0.4)))
                 RoundedRectangle(cornerRadius: 3)
-                    .fill(Color.accentColor.opacity(0.5))
-                    .overlay(RoundedRectangle(cornerRadius: 3).strokeBorder(Color.accentColor))
+                    .fill(Color.chumBlue.opacity(0.5))
+                    .overlay(RoundedRectangle(cornerRadius: 3).strokeBorder(Color.chumBlue))
                     .frame(width: max(2, target.width), height: max(2, target.height))
                     .offset(x: target.minX, y: area.height - target.maxY)
             }

@@ -226,7 +226,7 @@ struct LauncherView: View {
             .background(
                 RoundedRectangle(cornerRadius: 6)
                     .fill(index == viewModel.optionsSelectedIndex
-                          ? Color.accentColor.opacity(0.25)
+                          ? Color.chumBlueDark.opacity(0.25)
                           : Color.clear)
             )
             .contentShape(RoundedRectangle(cornerRadius: 6))
@@ -645,7 +645,7 @@ struct LauncherView: View {
                 .padding(.horizontal, 10)
                 .padding(.vertical, 3)
                 .background(
-                    Capsule().fill(selected ? Color.accentColor.opacity(0.18) : Color.clear)
+                    Capsule().fill(selected ? Color.chumBlue.opacity(0.18) : Color.clear)
                 )
         }
         .buttonStyle(.plain)
@@ -739,7 +739,7 @@ struct LauncherView: View {
                         .controlSize(.small)
                 } else {
                     Image(systemName: "paperplane")
-                        .foregroundStyle(viewModel.chatInput.trimmingCharacters(in: .whitespaces).isEmpty ? Color.secondary : Color.accentColor)
+                        .foregroundStyle(viewModel.chatInput.trimmingCharacters(in: .whitespaces).isEmpty ? Color.secondary : Color.chumBlue)
                 }
             }
             .buttonStyle(.plain)
@@ -913,7 +913,7 @@ struct ChatBubbleView: View {
                     .background(
                         RoundedRectangle(cornerRadius: 12)
                             .fill(message.role == .user
-                                  ? Color.accentColor.opacity(0.25)
+                                  ? Color.chumBlueDark.opacity(0.25)
                                   : Color.secondary.opacity(0.12))
                     )
                 if message.role == .assistant, isHovered {
@@ -992,8 +992,8 @@ struct ChatDiscussionRowView: View {
     }
 
     private var rowBackground: Color {
-        if isSelected { return Color.accentColor.opacity(0.25) }
-        if isHovered { return Color.accentColor.opacity(0.10) }
+        if isSelected { return Color.chumBlueDark.opacity(0.25) }
+        if isHovered { return Color.chumBlueDark.opacity(0.10) }
         return Color.clear
     }
 }
@@ -1029,8 +1029,8 @@ struct TransformRowView: View {
     }
 
     private var rowBackground: Color {
-        if isSelected { return Color.accentColor.opacity(0.25) }
-        if isHovered { return Color.accentColor.opacity(0.10) }
+        if isSelected { return Color.chumBlueDark.opacity(0.25) }
+        if isHovered { return Color.chumBlueDark.opacity(0.10) }
         return Color.clear
     }
 }
@@ -1068,8 +1068,8 @@ struct NoteRowView: View {
     }
 
     private var rowBackground: Color {
-        if isSelected { return Color.accentColor.opacity(0.25) }
-        if isHovered { return Color.accentColor.opacity(0.10) }
+        if isSelected { return Color.chumBlueDark.opacity(0.25) }
+        if isHovered { return Color.chumBlueDark.opacity(0.10) }
         return Color.clear
     }
 }
@@ -1207,8 +1207,8 @@ struct LauncherRowView: View {
     }
 
     private var rowBackground: Color {
-        if isSelected { return Color.accentColor.opacity(0.25) }
-        if isHovered { return Color.accentColor.opacity(0.10) }
+        if isSelected { return Color.chumBlueDark.opacity(0.25) }
+        if isHovered { return Color.chumBlueDark.opacity(0.10) }
         return Color.clear
     }
 
