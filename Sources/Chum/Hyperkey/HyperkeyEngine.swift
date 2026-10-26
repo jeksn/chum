@@ -1,28 +1,39 @@
 import AppKit
 import CoreGraphics
 import Foundation
-import IOKit
-import IOKit.hid
 import ChumCore
 
 /// Turns Caps Lock into a "hyper" modifier (⌃⌥⇧⌘).
 ///
-/// Caps Lock is not usable at the CGEvent level for this: each press toggles
-/// the lock state and releases emit no event at all, so physical press/release
-/// is detected with a passive `IOHIDManager` (the approach Hyperkey.app
-/// takes). A session event tap then consumes the Caps Lock flagsChanged (the
-/// lock never engages, a lone tap does nothing) and, while the key is held,
-/// inserts the hyper modifiers into every event. Carbon hotkey matching and
-/// shortcut recorders read event flags, so ⌃⌥⇧⌘+key works for Chum's
-/// hotkeys and in any app in the session.
+/// Detection lives ENTIRELY in the session event tap — the design of
+/// feedthejim/hyperkey, which never exhibits the "died silently" failure
+/// our earlier IOHIDManager-based engine kept hitting:
 ///
-/// The tap and the HID monitor run on a DEDICATED thread's run loop, not the
-/// main one: a busy main thread delays tap callbacks past the system's tap
-/// timeout, which disables the tap (it is re-enabled on the timeout event,
-/// but under sustained load it keeps bouncing) and makes hyper detection lag
-/// for seconds — "hyper stops working while window commands (plain Carbon
-/// hotkeys) keep working". A private run loop keeps event latency independent
-/// of whatever the main thread is doing.
+/// 1. hidutil remaps Caps Lock to F18 at the driver level (so the lock
+///    state and LED never engage).
+/// 2. The tap watches F18 keyDown/keyUp — hyper down/up state — and
+///    consumes them so apps never see a stray key.
+/// 3. Fallback: when the remap is NOT applied, caps presses arrive as
+///    flagsChanged (keycode 0x39) — alphaShift present = down — and the
+///    tap consumes those instead. (The HID-level lock state still changes
+///    on that path; only the remap fully prevents it.)
+/// 4. While hyper is held, the tap inserts the four modifiers into every
+///    event's flags — Carbon hotkey matching and recorders read event
+///    flags, so ⌃⌥⇧⌘+key works for Chum's hotkeys and in any app in the
+///    session.
+///
+/// There is no IOHIDManager: a passive HID monitor can silently stop
+/// delivering (keyboard re-enumeration, sleep/wake), which leaves the tap
+/// healthy but hyper dead — a state a watchdog can't even see, since no
+/// HID events reads as "user idle". One component, one failure domain: if
+/// the tap is dead nothing works anyway, and the system's
+/// tapDisabledByTimeout notification re-enables it.
+///
+/// The tap runs on a DEDICATED thread's run loop, not the main one — a busy
+/// main thread delays tap callbacks past the system's tap timeout, which
+/// disables the tap; a private run loop keeps event latency independent of
+/// whatever the main thread is doing. A didWake observer rebuilds the
+/// engine after sleep, the one known silent killer of session taps.
 final class HyperkeyEngine: @unchecked Sendable {
     static let shared = HyperkeyEngine()
 
@@ -32,9 +43,6 @@ final class HyperkeyEngine: @unchecked Sendable {
     private static let hyperFlags: CGEventFlags = [.maskCommand, .maskControl, .maskAlternate, .maskShift]
     /// kVK_CapsLock
     private static let capsLockKeyCode: Int64 = 0x39
-    /// HID usage page 0x07 (keyboard) / usage 0x39 (Caps Lock)
-    private static let keyboardUsagePage: UInt32 = 0x07
-    private static let capsLockUsage: UInt32 = 0x39
     /// Left cmd / option / control / shift keycodes, for synthetic
     /// flagsChanged events attributed per modifier key.
     private static let modifierKeycodes: [(keyCode: CGKeyCode, flag: CGEventFlags)] = [
@@ -54,21 +62,13 @@ final class HyperkeyEngine: @unchecked Sendable {
     {"UserKeyMapping":[]}
     """
 
-    /// The thread that owns the event tap, the HID monitor, and the
-    /// engine-confined state below. Main only calls start()/stop()/restart();
-    /// the lifecycle vars it touches are guarded by `stateLock`.
+    /// The thread that owns the event tap and the engine-confined state
+    /// below. Main only calls start()/stop()/restart(); the lifecycle vars
+    /// it touches are guarded by `stateLock`.
     private var engineThread: Thread?
     private var engineRunLoop: CFRunLoop?
     private var teardownSignal: DispatchSemaphore?
     private var setupSucceeded = false
-    /// Tap/HID activity timestamps — the watchdog's inputs. The HID monitor
-    /// sees raw keyboard input no matter what the session does (Secure
-    /// Input, dead taps), so recent HID activity with a silent tap means the
-    /// tap died silently.
-    private var lastTapEventAt: Date?
-    private var lastHIDEventAt: Date?
-    private var lastRestartAt: Date?
-    private var watchdogTimer: DispatchSourceTimer?
     private var wakeObserver: NSObjectProtocol?
     private let stateLock = NSLock()
 
@@ -76,7 +76,6 @@ final class HyperkeyEngine: @unchecked Sendable {
     private var capsIsDown = false
     private var eventTap: CFMachPort?
     private var runLoopSource: CFRunLoopSource?
-    private var hidManager: IOHIDManager?
     private var didApplyCapsRemap = false
     // kCGEventSourceStatePrivate is not exposed as a Swift enum case; its raw
     // value is ~0. A private source isolates synthetic events from the shared
@@ -120,21 +119,19 @@ final class HyperkeyEngine: @unchecked Sendable {
         let succeeded = setupSucceeded
         stateLock.unlock()
         if !succeeded {
-            // The thread tore itself down (tap creation failed, Input
-            // Monitoring denied): clear the lifecycle so the next start()
-            // can try again instead of pointing at a dead thread forever.
+            // The thread tore itself down (tap creation failed): clear the
+            // lifecycle so the next start() can try again instead of
+            // pointing at a dead thread forever.
             stateLock.lock()
             engineThread = nil
             teardownSignal = nil
             stateLock.unlock()
             return
         }
-        startWatchdog()
         startWakeObserver()
     }
 
     func stop() {
-        stopWatchdog()
         stopWakeObserver()
         stateLock.lock()
         guard let thread = engineThread else { stateLock.unlock(); return }
@@ -152,16 +149,15 @@ final class HyperkeyEngine: @unchecked Sendable {
         _ = signal?.wait(timeout: .now() + 2)
     }
 
-    /// Rebuilds the engine — the watchdog and wake self-heal path. Main
-    /// thread.
+    /// Rebuilds the engine — the wake self-heal path. Main thread.
     func restart() {
         stop()
         start()
     }
 
-    /// Engine thread: sets up the tap + HID monitor on this thread's run
-    /// loop, signals `ready`, then services events until CFRunLoopStop —
-    /// from stop() — ends the loop, and tears everything down.
+    /// Engine thread: sets up the tap on this thread's run loop, signals
+    /// `ready`, then services events until CFRunLoopStop — from stop() —
+    /// ends the loop, and tears everything down.
     private func runEngine(ready: DispatchSemaphore, teardown: DispatchSemaphore) {
         let runLoop = CFRunLoopGetCurrent()
         stateLock.lock()
@@ -202,19 +198,11 @@ final class HyperkeyEngine: @unchecked Sendable {
         CGEvent.tapEnable(tap: tap, enable: true)
         eventTap = tap
         runLoopSource = source
-        startHIDMonitor()
-
-        // Without press/release state the key cannot behave as a modifier at
-        // all — tear down so Caps Lock keeps working normally (the settings
-        // UI shows the missing-permission warning).
-        guard hidManager != nil else {
-            ready.signal()
-            tearDownEngine()
-            teardown.signal()
-            return
-        }
 
         applyCapsRemap()
+        if !didApplyCapsRemap {
+            NSLog("Chum Hyperkey: hidutil remap not applied — running on the caps flagsChanged fallback")
+        }
         stateLock.lock()
         setupSucceeded = true
         stateLock.unlock()
@@ -225,7 +213,7 @@ final class HyperkeyEngine: @unchecked Sendable {
     }
 
     /// Engine thread: reverts the remap, releases modifiers, and removes the
-    /// tap + HID monitor from this thread's run loop.
+    /// tap from this thread's run loop.
     private func tearDownEngine() {
         if didApplyCapsRemap {
             didApplyCapsRemap = false
@@ -241,63 +229,16 @@ final class HyperkeyEngine: @unchecked Sendable {
         if let source = runLoopSource {
             CFRunLoopRemoveSource(CFRunLoopGetCurrent(), source, .defaultMode)
         }
-        if let manager = hidManager {
-            IOHIDManagerUnscheduleFromRunLoop(manager, CFRunLoopGetCurrent(), CFRunLoopMode.defaultMode.rawValue)
-            IOHIDManagerClose(manager, IOOptionBits(kIOHIDOptionsTypeNone))
-        }
         eventTap = nil
         runLoopSource = nil
-        hidManager = nil
         stateLock.lock()
         engineRunLoop = nil
         stateLock.unlock()
     }
 
-    /// Physical Caps Lock press/release only exists at the HID level.
-    private func startHIDMonitor() {
-        guard hidManager == nil else { return }
-
-        let manager = IOHIDManagerCreate(kCFAllocatorDefault, IOOptionBits(kIOHIDOptionsTypeNone))
-        IOHIDManagerSetDeviceMatching(manager, [
-            kIOHIDDeviceUsagePageKey: kHIDPage_GenericDesktop,
-            kIOHIDDeviceUsageKey: kHIDUsage_GD_Keyboard
-        ] as CFDictionary)
-
-        let callback: IOHIDValueCallback = { context, _, _, value in
-            guard let context else { return }
-            let engine = Unmanaged<HyperkeyEngine>.fromOpaque(context).takeUnretainedValue()
-            engine.handleHIDValue(value)
-        }
-        IOHIDManagerRegisterInputValueCallback(manager, callback, Unmanaged.passUnretained(self).toOpaque())
-        IOHIDManagerScheduleWithRunLoop(manager, CFRunLoopGetCurrent(), CFRunLoopMode.defaultMode.rawValue)
-
-        // Opening keyboard devices for monitoring needs Input Monitoring;
-        // prompt for it and try again on the next toggle if it was denied.
-        guard IOHIDManagerOpen(manager, IOOptionBits(kIOHIDOptionsTypeNone)) == kIOReturnSuccess else {
-            CGRequestListenEventAccess()
-            IOHIDManagerUnscheduleFromRunLoop(manager, CFRunLoopGetCurrent(), CFRunLoopMode.defaultMode.rawValue)
-            IOHIDManagerClose(manager, IOOptionBits(kIOHIDOptionsTypeNone))
-            return
-        }
-
-        hidManager = manager
-    }
-
-    private func handleHIDValue(_ value: IOHIDValue) {
-        markHIDEvent()
-        let element = IOHIDValueGetElement(value)
-        guard IOHIDElementGetUsagePage(element) == Self.keyboardUsagePage,
-              IOHIDElementGetUsage(element) == Self.capsLockUsage
-        else { return }
-
-        let isDown = IOHIDValueGetIntegerValue(value) != 0
-        guard isDown != capsIsDown else { return }
-        capsIsDown = isDown
-        postHyperFlags(down: isDown)
-    }
-
     private func handleEvent(type: CGEventType, event: CGEvent) -> CGEvent? {
-        markTapEvent()
+        // The system disables the tap when the callback times out; the
+        // notification is delivered here and re-arms it.
         if type == .tapDisabledByTimeout || type == .tapDisabledByUserInput {
             if let tap = eventTap {
                 CGEvent.tapEnable(tap: tap, enable: true)
@@ -309,21 +250,29 @@ final class HyperkeyEngine: @unchecked Sendable {
             return event
         }
 
-        // Fallback for when the driver remap did not apply: hide the caps
-        // flagsChanged so its event never reaches apps. Note the HID-level
-        // lock/LED state still changes — only the remap prevents that.
-        if hidManager != nil,
-           type == .flagsChanged,
-           event.getIntegerValueField(.keyboardEventKeycode) == Self.capsLockKeyCode {
+        let keyCode = event.getIntegerValueField(.keyboardEventKeycode)
+
+        // The driver remap turns caps presses into F18 key events — the
+        // primary hyper signal. Consume them and track down/up state.
+        if keyCode == Self.f18KeyCode {
+            let isDown = type == .keyDown
+            if isDown != capsIsDown {
+                capsIsDown = isDown
+                postHyperFlags(down: isDown)
+            }
             return nil
         }
 
-        // The driver remap turns caps presses into F18 key events; consume
-        // them so apps never see a stray key (the HID monitor drives the
-        // actual hyper state).
-        if didApplyCapsRemap,
-           type == .keyDown || type == .keyUp,
-           event.getIntegerValueField(.keyboardEventKeycode) == Self.f18KeyCode {
+        // Fallback for when the driver remap did not apply: caps arrives as
+        // flagsChanged, alphaShift present = down. Consume it so the lock
+        // never engages at the CG level. (The HID-level lock/LED state
+        // still changes on this path — only the remap fully prevents that.)
+        if type == .flagsChanged, keyCode == Self.capsLockKeyCode {
+            let isDown = event.flags.contains(.maskAlphaShift)
+            if isDown != capsIsDown {
+                capsIsDown = isDown
+                postHyperFlags(down: isDown)
+            }
             return nil
         }
 
@@ -368,62 +317,10 @@ final class HyperkeyEngine: @unchecked Sendable {
 
     // MARK: - Self-healing
     //
-    // Taps die silently more often than they die loudly: wake-from-sleep
-    // frequently leaves a session tap receiving nothing (with no disabled
-    // notification delivered), and Secure-Input aftermath can too. The HID
-    // monitor is the ground truth — it sees raw keyboard input no matter
-    // what the session does — so recent typing that reached HID but not the
-    // tap means the tap is dead and the engine needs rebuilding.
-
-    private func markTapEvent() {
-        stateLock.lock()
-        lastTapEventAt = Date()
-        stateLock.unlock()
-    }
-
-    private func markHIDEvent() {
-        stateLock.lock()
-        lastHIDEventAt = Date()
-        stateLock.unlock()
-    }
-
-    private func startWatchdog() {
-        let timer = DispatchSource.makeTimerSource(queue: DispatchQueue.global(qos: .utility))
-        timer.schedule(deadline: .now() + 20, repeating: 20)
-        timer.setEventHandler { [weak self] in self?.checkHealth() }
-        timer.resume()
-        watchdogTimer = timer
-    }
-
-    private func stopWatchdog() {
-        watchdogTimer?.cancel()
-        watchdogTimer = nil
-    }
-
-    private func checkHealth() {
-        stateLock.lock()
-        guard engineThread != nil else { stateLock.unlock(); return }
-        let hid = lastHIDEventAt
-        let tap = lastTapEventAt
-        let lastRestart = lastRestartAt
-        stateLock.unlock()
-
-        // No recent typing: nothing to conclude — an idle machine with a
-        // dead tap looks identical to an idle machine with a live one.
-        guard let hid, Date().timeIntervalSince(hid) < 20 else { return }
-        let tapSilent = tap.map { Date().timeIntervalSince($0) > 20 } ?? true
-        guard tapSilent else { return }
-        // Rate-limit: while Secure Input is active (password prompts) taps
-        // legitimately receive nothing, and rebuilding won't help — don't
-        // restart-storm.
-        if let lastRestart, Date().timeIntervalSince(lastRestart) < 60 { return }
-
-        stateLock.lock()
-        lastRestartAt = Date()
-        stateLock.unlock()
-        NSLog("Chum Hyperkey: event tap stopped receiving events — rebuilding engine")
-        DispatchQueue.main.async { [weak self] in self?.restart() }
-    }
+    // With detection inside the tap there is one failure domain: a dead tap
+    // means the callback isn't running at all, which the timeout
+    // notification covers. The remaining silent killer is wake-from-sleep,
+    // so the engine rebuilds once after the machine wakes.
 
     private func startWakeObserver() {
         wakeObserver = NSWorkspace.shared.notificationCenter.addObserver(

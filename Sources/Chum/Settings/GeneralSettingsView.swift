@@ -104,7 +104,7 @@ struct GeneralSettingsView: View {
             } header: {
                 Text("Hyper Key")
             } footer: {
-                Text("Hold Caps Lock to send ⌃⌥⇧⌘ — a modifier combo no other app uses, ideal for Chum hotkeys. A lone Caps Lock tap does nothing. While enabled, Caps Lock is remapped at the driver level (to F18) so the lock state and LED stay off; this reverts when disabled and replaces any Caps Lock remap from System Settings. Requires Accessibility and Input Monitoring. Quit Hyperkey.app or other Caps Lock remappers first — two active remappers on the same key conflict.")
+                Text("Hold Caps Lock to send ⌃⌥⇧⌘ — a modifier combo no other app uses, ideal for Chum hotkeys. A lone Caps Lock tap does nothing. While enabled, Caps Lock is remapped at the driver level (to F18) so the lock state and LED stay off; this reverts when disabled and replaces any Caps Lock remap from System Settings. Requires Accessibility (Input Monitoring is no longer needed — detection lives in the event tap itself). Quit Hyperkey.app or other Caps Lock remappers first — two active remappers on the same key conflict.")
             }
 
             Section {
