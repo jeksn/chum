@@ -186,7 +186,11 @@ final class LauncherController: NSObject, NSWindowDelegate {
     }
 
     func close() {
-        lastShownCategory = viewModel.selectedCategory
+        // Only AI Chat reopens where it was left — the ongoing conversation
+        // is the one context worth resuming. Every other category (clipboard
+        // lookups, snippets, scratchpad jots) is a fire-and-forget action:
+        // a fresh open starts on the main search.
+        lastShownCategory = viewModel.selectedCategory == .aiChat ? .aiChat : nil
         panel?.orderOut(nil)
     }
 
