@@ -19,17 +19,43 @@ struct SettingsView: View {
         }
     }
 
-    private var settingsBody: some View {
-        NavigationSplitView {
-            List(selection: $selection) {
-                Section {
-                    ForEach(SettingsSection.allCases) { section in
-                        Label(section.title, systemImage: section.icon)
-                            .tag(section)
-                    }
+    /// A small brand mark above the sidebar — app icon, name, version —
+    /// deliberately modest so the panel doesn't turn into a landing page.
+    private var sidebarHeader: some View {
+        HStack(spacing: 10) {
+            Image(nsImage: NSApp.applicationIconImage)
+                .resizable()
+                .frame(width: 26, height: 26)
+            VStack(alignment: .leading, spacing: 0) {
+                Text("Chum")
+                    .font(.system(size: 13, weight: .semibold))
+                if let version = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String {
+                    Text("v\(version)")
+                        .font(.caption2)
+                        .foregroundStyle(.tertiary)
                 }
             }
-            .listStyle(.sidebar)
+            Spacer(minLength: 0)
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 8)
+    }
+
+    private var settingsBody: some View {
+        NavigationSplitView {
+            VStack(spacing: 0) {
+                sidebarHeader
+                Divider()
+                List(selection: $selection) {
+                    Section {
+                        ForEach(SettingsSection.allCases) { section in
+                            Label(section.title, systemImage: section.icon)
+                                .tag(section)
+                        }
+                    }
+                }
+                .listStyle(.sidebar)
+            }
             .navigationSplitViewColumnWidth(min: 180, ideal: 200, max: 240)
         } detail: {
             switch selection {
