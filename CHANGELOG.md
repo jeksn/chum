@@ -1,5 +1,14 @@
 # Changelog
 
+## v1.0.1 — Reliability, aliases, blue (Oct 30, 2026)
+
+- **Snippet expansion is reliable again**: the keystroke monitor now runs on its own thread and re-arms itself if the system disables it (one busy moment used to kill expansion silently until relaunch), and expansions abort safely instead of mangling text when extra keystrokes race the erase — the "stuck on the trigger" bug
+- **Hyperkey engine redesigned** after the proven Hyperkey.app approach: Caps Lock detection lives in the event tap itself (F18 via the driver remap), no more passive HID monitor to die silently — and Input Monitoring is no longer required, only Accessibility; a wake-from-sleep rebuild keeps it alive
+- **Launcher aliases**: ⌘K on any row has an "Alias:" field — give an item an alternate name and an exact match ranks it above everything ("sys" → System Settings); the options modal no longer clips on short result lists
+- **The launcher reopens on AI Chat** when you closed it there; every other category opens fresh on the main search
+- **New artwork**: app icon and menu bar mark (streamline airship), Chum blue accents matching the landing page (row tints, chat bubbles, sidebar tabs), and the search bar is a plain native magnifying glass again
+- **Settings**: an About section tops General — app icon, version, macOS version, launch-at-login, updates, Accessibility status, and the GitHub repo link
+
 ## v1.0.0 — Chum (Oct 24, 2026)
 
 - **Renamed Trast → Chum**. New bundle id (`com.chum.app`), new `chum://` URL scheme, new signing identity — Chum is a fresh app to macOS, so grant Accessibility and Input Monitoring once on first use
