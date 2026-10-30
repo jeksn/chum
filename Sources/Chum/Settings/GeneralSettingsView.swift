@@ -24,6 +24,58 @@ struct GeneralSettingsView: View {
     var body: some View {
         Form {
             Section {
+                HStack(spacing: 14) {
+                    Image(nsImage: NSApp.applicationIconImage)
+                        .resizable()
+                        .frame(width: 52, height: 52)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Chum")
+                            .font(.system(size: 15, weight: .semibold))
+                        Text("Version \(UpdateChecker.currentVersion)")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                    Spacer()
+                }
+                .padding(.vertical, 4)
+                Toggle("Launch at login", isOn: $launchAtLogin)
+                    .onChange(of: launchAtLogin) { enabled in
+                        do {
+                            if enabled {
+                                try SMAppService.mainApp.register()
+                            } else {
+                                try SMAppService.mainApp.unregister()
+                            }
+                        } catch {
+                            launchAtLogin = SMAppService.mainApp.status == .enabled
+                        }
+                    }
+                Toggle("Check for updates on launch", isOn: $autoCheckUpdates)
+                Button("Check for Updates…") {
+                    UpdateChecker.checkForUpdates()
+                }
+                LabeledContent("System", value: Self.systemVersion)
+                HStack {
+                    Label(
+                        isTrusted ? "Accessibility granted" : "Accessibility permission required",
+                        systemImage: isTrusted ? "checkmark.circle.fill" : "exclamationmark.triangle.fill"
+                    )
+                    .foregroundStyle(isTrusted ? Color.green : Color.orange)
+                    Spacer()
+                    Button("Refresh") { isTrusted = Accessibility.isTrusted }
+                    Button("Open System Settings") {
+                        Accessibility.openSystemSettings()
+                    }
+                }
+                Link("GitHub — github.com/jeksn/chum", destination: URL(string: "https://github.com/jeksn/chum")!)
+                    .font(.system(size: 12))
+            } header: {
+                Text("About")
+            } footer: {
+                Text("Window management, a Spotlight-style launcher, snippets, and text tools for macOS. Open source — issues and feedback on GitHub.")
+            }
+
+            Section {
                 HotkeyRecorderView("Launcher:", name: HotkeyManager.openLauncher)
                 Toggle("Slight transparency", isOn: $slightTransparency)
                 Toggle("Show Clipboard tab", isOn: $showClipboardTab)
@@ -133,38 +185,6 @@ struct GeneralSettingsView: View {
                 Text("Saves or restores all commands and shortcuts to a JSON file. Hotkey bindings are not included — reassign them after importing on a new machine.")
             }
 
-            Section("System") {
-                LabeledContent("Version", value: UpdateChecker.currentVersion)
-                Toggle("Launch at login", isOn: $launchAtLogin)
-                    .onChange(of: launchAtLogin) { enabled in
-                        do {
-                            if enabled {
-                                try SMAppService.mainApp.register()
-                            } else {
-                                try SMAppService.mainApp.unregister()
-                            }
-                        } catch {
-                            launchAtLogin = SMAppService.mainApp.status == .enabled
-                        }
-                    }
-                Toggle("Check for updates on launch", isOn: $autoCheckUpdates)
-                Button("Check for Updates…") {
-                    UpdateChecker.checkForUpdates()
-                }
-                HStack {
-                    Label(
-                        isTrusted ? "Accessibility granted" : "Accessibility permission required",
-                        systemImage: isTrusted ? "checkmark.circle.fill" : "exclamationmark.triangle.fill"
-                    )
-                    .foregroundStyle(isTrusted ? Color.green : Color.orange)
-                    Spacer()
-                    Button("Refresh") { isTrusted = Accessibility.isTrusted }
-                    Button("Open System Settings") {
-                        Accessibility.openSystemSettings()
-                    }
-                }
-            }
-
             Section("URL Scheme") {
                 VStack(alignment: .leading, spacing: 6) {
                     Text("chum://apply?name=Left%20Half")
@@ -186,6 +206,11 @@ struct GeneralSettingsView: View {
         } message: {
             Text("The selected file could not be read as a Chum configuration file.")
         }
+    }
+
+    private static var systemVersion: String {
+        let v = ProcessInfo.processInfo.operatingSystemVersion
+        return "macOS \(v.majorVersion).\(v.minorVersion)"
     }
 
     private func exportConfig() {
