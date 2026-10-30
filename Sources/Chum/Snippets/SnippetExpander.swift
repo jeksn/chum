@@ -29,12 +29,31 @@ final class SnippetExpander {
     /// How long the expansion stays on the pasteboard before the user's
     /// clipboard content is restored.
     private static let clipboardRestoreInterval: TimeInterval = 0.25
+    /// The typed buffer never grows past this; a delimiter always resets it
+    /// long before, this only bounds the pathological case.
+    private static let bufferLimit = 64
 
+    // Lifecycle vars — touched from main, guarded by `stateLock`.
+    private var tapThread: Thread?
+    private var tapRunLoop: CFRunLoop?
+    private var teardownSignal: DispatchSemaphore?
+    private var setupSucceeded = false
     private var eventTap: CFMachPort?
     private var runLoopSource: CFRunLoopSource?
-    private var buffer = ""
     private var clickMonitor: Any?
     private var appChangeObserver: NSObjectProtocol?
+    private var wakeObserver: NSObjectProtocol?
+    /// Incremented for every real keyDown the tap observes. An expansion
+    /// captures the value at match time and aborts if any keystroke lands
+    /// before its selection sweep starts — otherwise the sweep would select
+    /// the wrong range (keyword + the extra typed characters), leaving
+    /// residue instead of expanding ("stuck on the trigger").
+    private var keystrokeGeneration = 0
+    private let stateLock = NSLock()
+
+    // Typed context — written from the tap thread and cleared from main
+    // (click/app-change/wake observers), so all access takes `stateLock`.
+    private var buffer = ""
     private let injectQueue = DispatchQueue(label: "com.chum.snippet.inject", qos: .userInteractive)
     // kCGEventSourceStatePrivate is not exposed as a Swift enum case; its raw
     // value is ~0. A private source isolates synthetic events from the shared
@@ -43,81 +62,78 @@ final class SnippetExpander {
 
     private init() {}
 
-    var isRunning: Bool { eventTap != nil }
+    var isRunning: Bool {
+        stateLock.lock(); defer { stateLock.unlock() }
+        return eventTap != nil
+    }
 
     func start() {
         guard AppSettings.snippetsEnabled else { return }
-        guard eventTap == nil else { return }
-        guard ensureInputMonitoringPermission() else { return }
-
-        let eventMask = CGEventMask(1 << CGEventType.keyDown.rawValue)
-
-        let callback: CGEventTapCallBack = { _, _, event, userInfo in
-            guard let userInfo else { return Unmanaged.passRetained(event) }
-            let expander = Unmanaged<SnippetExpander>.fromOpaque(userInfo).takeUnretainedValue()
-            return expander.handleEvent(event) ? Unmanaged.passRetained(event) : nil
+        stateLock.lock()
+        guard tapThread == nil else { stateLock.unlock(); return }
+        stateLock.unlock()
+        guard ensureInputMonitoringPermission() else {
+            NSLog("Chum Snippets: Input Monitoring not granted — expansion inactive")
+            return
         }
 
-        let userInfo = Unmanaged.passUnretained(self).toOpaque()
+        let ready = DispatchSemaphore(value: 0)
+        let teardown = DispatchSemaphore(value: 0)
+        let thread = Thread { [unowned self] in
+            self.runTapLoop(ready: ready, teardown: teardown)
+        }
+        thread.name = "ChumSnippetTap"
+        thread.stackSize = 1 << 17
 
-        guard let tap = CGEvent.tapCreate(
-            tap: .cghidEventTap,
-            place: .headInsertEventTap,
-            options: .listenOnly,
-            eventsOfInterest: eventMask,
-            callback: callback,
-            userInfo: userInfo
-        ) else { return }
+        stateLock.lock()
+        tapThread = thread
+        teardownSignal = teardown
+        stateLock.unlock()
+        thread.start()
 
-        let source = CFMachPortCreateRunLoopSource(kCFAllocatorDefault, tap, 0)
-        CFRunLoopAddSource(CFRunLoopGetMain(), source, .commonModes)
-
-        CGEvent.tapEnable(tap: tap, enable: true)
-
-        eventTap = tap
-        runLoopSource = source
+        // Hold start() until the tap thread finished setup — stop() and
+        // isRunning would otherwise race a thread still building its tap.
+        _ = ready.wait(timeout: .now() + 2)
+        stateLock.lock()
+        let succeeded = setupSucceeded
+        stateLock.unlock()
+        if !succeeded {
+            stateLock.lock()
+            tapThread = nil
+            teardownSignal = nil
+            stateLock.unlock()
+            return
+        }
         installClickMonitor()
         observeAppChanges()
+        startWakeObserver()
     }
 
     func stop() {
-        if let tap = eventTap {
-            CGEvent.tapEnable(tap: tap, enable: false)
-        }
-        if let source = runLoopSource {
-            CFRunLoopRemoveSource(CFRunLoopGetMain(), source, .commonModes)
-        }
+        stopWakeObserver()
         if let clickMonitor {
             NSEvent.removeMonitor(clickMonitor)
         }
         if let appChangeObserver {
             NSWorkspace.shared.notificationCenter.removeObserver(appChangeObserver)
         }
-        eventTap = nil
-        runLoopSource = nil
         clickMonitor = nil
         appChangeObserver = nil
-        buffer = ""
-    }
+        clearBuffer()
 
-    /// Clicking into another field invalidates the typed context.
-    private func installClickMonitor() {
-        guard clickMonitor == nil else { return }
-        clickMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown, .otherMouseDown]) { [weak self] _ in
-            self?.buffer = ""
-        }
-    }
+        stateLock.lock()
+        guard let thread = tapThread else { stateLock.unlock(); return }
+        tapThread = nil
+        let signal = teardownSignal
+        teardownSignal = nil
+        let runLoop = tapRunLoop
+        stateLock.unlock()
 
-    /// Switching apps invalidates the typed context.
-    private func observeAppChanges() {
-        guard appChangeObserver == nil else { return }
-        appChangeObserver = NSWorkspace.shared.notificationCenter.addObserver(
-            forName: NSWorkspace.didActivateApplicationNotification,
-            object: nil,
-            queue: .main
-        ) { [weak self] _ in
-            self?.buffer = ""
-        }
+        // The thread may have already torn itself down (failed setup).
+        guard thread.isExecuting else { return }
+        if let runLoop { CFRunLoopStop(runLoop) }
+        // On timeout the tap thread finishes its own teardown alone.
+        _ = signal?.wait(timeout: .now() + 2)
     }
 
     func restart() {
@@ -131,17 +147,165 @@ final class SnippetExpander {
         return CGPreflightListenEventAccess()
     }
 
-    private func handleEvent(_ event: CGEvent) -> Bool {
+    /// Tap thread: creates the listen tap on its own run loop — never the
+    /// main one, so a busy main thread can't delay keystroke observation
+    /// past the system's tap timeout (which permanently disabled the tap in
+    /// the old main-loop build and silently killed expansion).
+    private func runTapLoop(ready: DispatchSemaphore, teardown: DispatchSemaphore) {
+        let runLoop = CFRunLoopGetCurrent()
+        stateLock.lock()
+        tapRunLoop = runLoop
+        setupSucceeded = false
+        stateLock.unlock()
+
+        let eventMask = CGEventMask(1 << CGEventType.keyDown.rawValue)
+
+        let callback: CGEventTapCallBack = { _, type, event, userInfo in
+            guard let userInfo else { return Unmanaged.passRetained(event) }
+            let expander = Unmanaged<SnippetExpander>.fromOpaque(userInfo).takeUnretainedValue()
+            return expander.handleEvent(type: type, event: event) ? Unmanaged.passRetained(event) : nil
+        }
+
+        guard let tap = CGEvent.tapCreate(
+            tap: .cghidEventTap,
+            place: .headInsertEventTap,
+            options: .listenOnly,
+            eventsOfInterest: eventMask,
+            callback: callback,
+            userInfo: Unmanaged.passUnretained(self).toOpaque()
+        ) else {
+            NSLog("Chum Snippets: event tap creation failed — expansion inactive (Input Monitoring permission?)")
+            stateLock.lock()
+            tapRunLoop = nil
+            stateLock.unlock()
+            ready.signal()
+            teardown.signal()
+            return
+        }
+
+        let source = CFMachPortCreateRunLoopSource(kCFAllocatorDefault, tap, 0)
+        CFRunLoopAddSource(runLoop, source, .commonModes)
+        CGEvent.tapEnable(tap: tap, enable: true)
+
+        stateLock.lock()
+        eventTap = tap
+        runLoopSource = source
+        setupSucceeded = true
+        stateLock.unlock()
+        ready.signal()
+        CFRunLoopRun()
+
+        // Tap thread teardown.
+        CGEvent.tapEnable(tap: tap, enable: false)
+        CFRunLoopRemoveSource(runLoop, source, .commonModes)
+        stateLock.lock()
+        eventTap = nil
+        runLoopSource = nil
+        tapRunLoop = nil
+        stateLock.unlock()
+        teardown.signal()
+    }
+
+    /// Clicking into another field invalidates the typed context.
+    private func installClickMonitor() {
+        guard clickMonitor == nil else { return }
+        clickMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown, .otherMouseDown]) { [weak self] _ in
+            self?.clearBuffer()
+        }
+    }
+
+    /// Switching apps invalidates the typed context.
+    private func observeAppChanges() {
+        guard appChangeObserver == nil else { return }
+        appChangeObserver = NSWorkspace.shared.notificationCenter.addObserver(
+            forName: NSWorkspace.didActivateApplicationNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            self?.clearBuffer()
+        }
+    }
+
+    private func startWakeObserver() {
+        wakeObserver = NSWorkspace.shared.notificationCenter.addObserver(
+            forName: NSWorkspace.didWakeNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            DispatchQueue.main.asyncAfter(deadline: .now() + 2) { [weak self] in
+                guard let self, self.isRunning else { return }
+                self.restart()
+            }
+        }
+    }
+
+    private func stopWakeObserver() {
+        if let wakeObserver {
+            NSWorkspace.shared.notificationCenter.removeObserver(wakeObserver)
+        }
+        wakeObserver = nil
+    }
+
+    // MARK: - Typed buffer
+    //
+    // Every access takes `stateLock`: the tap thread appends/reads, and the
+    // main thread clears (clicks, app switches, stop, wake).
+
+    private func clearBuffer() {
+        stateLock.lock()
+        buffer = ""
+        stateLock.unlock()
+    }
+
+    private func backspaceBuffer() {
+        stateLock.lock()
+        if !buffer.isEmpty { buffer.removeLast() }
+        stateLock.unlock()
+    }
+
+    private func appendBuffer(_ char: Character) {
+        stateLock.lock()
+        buffer.append(char)
+        if buffer.count > Self.bufferLimit { buffer = "" }
+        stateLock.unlock()
+    }
+
+    private var currentBuffer: String {
+        stateLock.lock(); defer { stateLock.unlock() }
+        return buffer
+    }
+
+    private func handleEvent(type: CGEventType, event: CGEvent) -> Bool {
+        // The system disables the tap when the callback times out; the
+        // notification is delivered here and re-arms it. The old build had
+        // no re-arm — one slow callback (busy main thread) killed expansion
+        // permanently and silently.
+        if type == .tapDisabledByTimeout || type == .tapDisabledByUserInput {
+            stateLock.lock()
+            let tap = eventTap
+            stateLock.unlock()
+            if let tap {
+                CGEvent.tapEnable(tap: tap, enable: true)
+            }
+            return true
+        }
+
+        guard type == .keyDown else { return true }
+
         if event.getIntegerValueField(.eventSourceUserData) == Self.syntheticTag {
             return true
         }
+
+        stateLock.lock()
+        keystrokeGeneration += 1
+        stateLock.unlock()
 
         // Keystrokes landing in Chum's own UI (launcher search, settings
         // fields) never expand: editing a snippet's keyword in Settings must
         // not fire the snippet. Our panel/windows are the key window only
         // while the user is actually typing into them.
         if NSApp.keyWindow != nil {
-            buffer = ""
+            clearBuffer()
             return true
         }
 
@@ -149,7 +313,7 @@ final class SnippetExpander {
         if flags.contains(.maskCommand) || flags.contains(.maskAlternate) || flags.contains(.maskControl) {
             // Modified keystrokes (paste, select all, shortcuts) never produce
             // contiguous typed text.
-            buffer = ""
+            clearBuffer()
             return true
         }
 
@@ -157,19 +321,19 @@ final class SnippetExpander {
 
         switch keyCode {
         case 36, 76:
-            buffer = ""
+            clearBuffer()
             return true
         case 53:
-            buffer = ""
+            clearBuffer()
             return true
         case 48:
-            buffer = ""
+            clearBuffer()
             return true
         case 49:
-            buffer = ""
+            clearBuffer()
             return true
         case 51:
-            if !buffer.isEmpty { buffer.removeLast() }
+            backspaceBuffer()
             return true
         default:
             break
@@ -183,32 +347,37 @@ final class SnippetExpander {
         // Keys that produce no text (arrows, function keys, Home/End, forward
         // delete) mean the cursor moved: the typed text is no longer contiguous.
         guard actualLength > 0 else {
-            buffer = ""
+            clearBuffer()
             return true
         }
 
         let charString = String(utf16CodeUnits: chars, count: actualLength)
         guard let char = charString.first else {
-            buffer = ""
+            clearBuffer()
             return true
         }
 
         if char.isWhitespace {
-            buffer = ""
+            clearBuffer()
             return true
         }
 
-        buffer.append(char)
+        appendBuffer(char)
 
         if let match = matchingSnippet() {
-            buffer = ""
-            expand(keyword: match.keyword, into: match.content)
+            stateLock.lock()
+            let generation = keystrokeGeneration
+            stateLock.unlock()
+            clearBuffer()
+            expand(keyword: match.keyword, into: match.content, generation: generation)
         }
 
         return true
     }
 
     private func matchingSnippet() -> Snippet? {
+        let buffer = currentBuffer
+        guard !buffer.isEmpty else { return nil }
         let snippets = SnippetStore.shared.validSnippets
         for snippet in snippets where snippet.keyword == buffer {
             return snippet
@@ -250,7 +419,12 @@ final class SnippetExpander {
     /// - Typing synthetically must be paced ~12ms/char (below that, events
     ///   coalesce and characters drop), so long expansions streamed visibly
     ///   for hundreds of milliseconds. A paste lands in a single frame.
-    private func expand(keyword: String, into expansion: String) {
+    ///
+    /// `generation` is the keystroke count at match time; if any real
+    /// keystroke lands before the sweep begins (fast typing after the
+    /// keyword, a lagging app), the sweep would select the wrong range —
+    /// abort instead of mangling the text.
+    private func expand(keyword: String, into expansion: String, generation: Int) {
         let clipboard = NSPasteboard.general.string(forType: .string) ?? ""
         let resolved = SnippetTemplate.resolve(expansion, clipboardContent: clipboard)
 
@@ -260,6 +434,16 @@ final class SnippetExpander {
 
         injectQueue.asyncAfter(deadline: .now() + Self.settleInterval) { [weak self] in
             guard let self else {
+                ClipboardMonitor.shared.resumeCapture()
+                return
+            }
+
+            stateLock.lock()
+            let currentGeneration = keystrokeGeneration
+            stateLock.unlock()
+            guard currentGeneration == generation else {
+                // A keystroke landed between the match and the sweep — the
+                // selection would cover the wrong range. Abort cleanly.
                 ClipboardMonitor.shared.resumeCapture()
                 return
             }
