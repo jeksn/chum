@@ -134,20 +134,54 @@ enum WindowManipulator {
         case failed(AXError)
     }
 
+    /// Applies the frame once, then verifies by reading it back — re-applying
+    /// only when the app has SETTLED on an off-target frame (size clamped
+    /// against the old position, minimum window size, ignored set), which is
+    /// what the retries exist for.
+    ///
+    /// The target app processes AX sets asynchronously, so a read-back right
+    /// after the set is usually stale; re-applying on that stale read makes
+    /// the window take the same frame two or more times — on systems/apps
+    /// that animate window changes that reads as a jiggle instead of a snap.
+    /// Polling until the frame converges keeps the common case a single set.
     @discardableResult
     static func setFrame(_ ref: WindowRef, to frame: CGRect) -> FrameSetResult {
         var lastSetError: AXError?
         var lastObserved: CGRect?
-        for _ in 0..<5 {
-            lastSetError = applyFrame(ref, to: frame)
-            if lastSetError == nil, let current = Self.frame(of: ref.window), isClose(current, frame) {
-                return .applied
-            }
+        var previousRead: CGRect?
+        var stableOffTargetReads = 0
+        var applies = 0
+        let maxApplies = 5
+        let deadline = Date().addingTimeInterval(0.5)
+
+        lastSetError = applyFrame(ref, to: frame)
+        applies += 1
+
+        while Date() < deadline {
             if let current = Self.frame(of: ref.window) {
                 lastObserved = current
+                if isClose(current, frame) { return .applied }
+                stableOffTargetReads = current == previousRead ? stableOffTargetReads + 1 : 0
+                previousRead = current
+            } else {
+                // Unreadable frame counts as a settled mismatch.
+                stableOffTargetReads += 1
             }
-            usleep(60_000)
+
+            // Re-apply only after the read-back has been stable off-target
+            // for a few polls (~60ms): the app finished processing and kept a
+            // different frame. While the frame is still moving (or the read
+            // simply raced the set), keep waiting instead of re-setting.
+            if stableOffTargetReads >= 3, applies < maxApplies {
+                stableOffTargetReads = 0
+                lastSetError = applyFrame(ref, to: frame)
+                applies += 1
+                usleep(60_000)
+                continue
+            }
+            usleep(20_000)
         }
+
         if let lastSetError { return .failed(lastSetError) }
         return .adjusted(lastObserved ?? frame)
     }
@@ -160,11 +194,18 @@ enum WindowManipulator {
             let pointValue = AXValueCreate(.cgPoint, &point)
         else { return .failure }
 
-        let sizeError = AXUIElementSetAttributeValue(ref.window, kAXSizeAttribute as CFString, sizeValue)
-        guard sizeError == .success else { return sizeError }
-
+        // Position first: macOS clamps SIZE changes to keep the window on
+        // screen relative to its current position, so setting size while the
+        // window is still at its old position clamps the size (e.g. Maximize
+        // from a small window) and the position set then moves the clamped
+        // window — a second apply that shows as a jiggle. Moving first means
+        // the size is validated against the final position and one apply
+        // lands exactly.
         let positionError = AXUIElementSetAttributeValue(ref.window, kAXPositionAttribute as CFString, pointValue)
         guard positionError == .success else { return positionError }
+
+        let sizeError = AXUIElementSetAttributeValue(ref.window, kAXSizeAttribute as CFString, sizeValue)
+        guard sizeError == .success else { return sizeError }
         return nil
     }
 

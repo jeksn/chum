@@ -22,7 +22,10 @@ final class CommandApplier {
         return command.cycledHalf(atStep: halfCycleStep)
     }
 
-    func apply(_ command: WindowCommand, target: WindowRef? = nil) {
+    /// `recordUsage` is on for every real trigger (hotkey, menu bar,
+    /// launcher, URL) and off for the Settings editor's test button, which
+    /// would otherwise inflate a command's usage memory.
+    func apply(_ command: WindowCommand, target: WindowRef? = nil, recordUsage: Bool = true) {
         guard Accessibility.ensureTrusted(prompt: true) else {
             HUD.show("Enable Accessibility in System Settings")
             return
@@ -34,6 +37,15 @@ final class CommandApplier {
         guard let currentFrame = WindowManipulator.frame(of: target.window) else {
             HUD.show("Could not read window geometry")
             return
+        }
+
+        if recordUsage {
+            // Off the hotkey thread: the UserDefaults write must never add
+            // latency between reading the window and setting its new frame.
+            let usageID = Self.launcherID(for: command)
+            DispatchQueue.global(qos: .utility).async {
+                UsageTracker.shared.record(usageID)
+            }
         }
 
         if command.id == WindowAction.nextDisplay.commandID {
@@ -86,6 +98,16 @@ final class CommandApplier {
         case .failed(let error):
             HUD.show("Could not resize window (\(error.rawValue))")
         }
+    }
+
+    /// The id the launcher uses for this command's row, so usage recorded
+    /// here (hotkey, menu, URL) and usage recorded by launcher activation
+    /// land on the same entry. Window actions key by `action.<id>`.
+    static func launcherID(for command: WindowCommand) -> String {
+        if let action = WindowAction.all.first(where: { $0.commandID == command.id }) {
+            return "action.\(action.id)"
+        }
+        return "command.\(command.id.uuidString)"
     }
 
     private func moveToNextDisplay(target: WindowRef, currentFrame: CGRect) {

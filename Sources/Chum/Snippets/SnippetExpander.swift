@@ -43,6 +43,8 @@ final class SnippetExpander {
     private var clickMonitor: Any?
     private var appChangeObserver: NSObjectProtocol?
     private var wakeObserver: NSObjectProtocol?
+    private var snippetObserver: NSObjectProtocol?
+    private var keyWindowObservers: [NSObjectProtocol] = []
     /// Incremented for every real keyDown the tap observes. An expansion
     /// captures the value at match time and aborts if any keystroke lands
     /// before its selection sweep starts — otherwise the sweep would select
@@ -51,14 +53,29 @@ final class SnippetExpander {
     private var keystrokeGeneration = 0
     private let stateLock = NSLock()
 
+    // Maintained on the MAIN thread only (key-window notifications, app
+    // activation, start/stop); the tap thread reads them under `stateLock`.
+    // Reading `NSApp.keyWindow` from the tap callback is not thread-safe and
+    // adds latency to a callback that must stay fast or the system disables
+    // the tap.
+    private var selfWindowIsKey = false
+    /// Snapshot of the enabled snippets, refreshed on the main thread when
+    /// the store changes, so the tap thread never touches the ObservableObject.
+    private var snippetSnapshot: [Snippet] = []
+
     // Typed context — written from the tap thread and cleared from main
     // (click/app-change/wake observers), so all access takes `stateLock`.
     private var buffer = ""
     private let injectQueue = DispatchQueue(label: "com.chum.snippet.inject", qos: .userInteractive)
     // kCGEventSourceStatePrivate is not exposed as a Swift enum case; its raw
     // value is ~0. A private source isolates synthetic events from the shared
-    // HID state so physical keys held during expansion can't suppress them.
+    // HID state so physical keys held during expansion can't suppress them —
+    // used for the selection sweep.
     private let injectSource = CGEventSource(stateID: CGEventSourceStateID(rawValue: -1)!)
+    /// The paste key goes through the HID system source instead — the same
+    /// recipe as the launcher's paste-on-select, which is the path proven to
+    /// reach menu shortcuts (Cmd+V) in target apps.
+    private let pasteSource = CGEventSource(stateID: .hidSystemState)
 
     private init() {}
 
@@ -106,6 +123,10 @@ final class SnippetExpander {
         }
         installClickMonitor()
         observeAppChanges()
+        observeSnippetChanges()
+        installKeyWindowObservers()
+        refreshSnippetSnapshot()
+        updateSelfKeyWindow()
         startWakeObserver()
     }
 
@@ -117,8 +138,16 @@ final class SnippetExpander {
         if let appChangeObserver {
             NSWorkspace.shared.notificationCenter.removeObserver(appChangeObserver)
         }
+        if let snippetObserver {
+            NotificationCenter.default.removeObserver(snippetObserver)
+        }
+        for observer in keyWindowObservers {
+            NotificationCenter.default.removeObserver(observer)
+        }
         clickMonitor = nil
         appChangeObserver = nil
+        snippetObserver = nil
+        keyWindowObservers = []
         clearBuffer()
 
         stateLock.lock()
@@ -223,7 +252,51 @@ final class SnippetExpander {
             queue: .main
         ) { [weak self] _ in
             self?.clearBuffer()
+            self?.updateSelfKeyWindow()
         }
+    }
+
+    /// Re-snapshots the enabled snippets on every store mutation (main
+    /// thread) so the tap thread matches against a plain array.
+    private func observeSnippetChanges() {
+        guard snippetObserver == nil else { return }
+        snippetObserver = NotificationCenter.default.addObserver(
+            forName: SnippetStore.didChange,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            self?.refreshSnippetSnapshot()
+        }
+    }
+
+    private func refreshSnippetSnapshot() {
+        let snapshot = SnippetStore.shared.validSnippets
+        stateLock.lock()
+        snippetSnapshot = snapshot
+        stateLock.unlock()
+    }
+
+    /// Key-window changes decide whether keystrokes land in Chum's own UI
+    /// (launcher search, settings fields — never expanded). AppKit is only
+    /// touched here, on the main thread; the tap thread reads the flag.
+    private func installKeyWindowObservers() {
+        guard keyWindowObservers.isEmpty else { return }
+        let center = NotificationCenter.default
+        keyWindowObservers = [
+            center.addObserver(forName: NSWindow.didBecomeKeyNotification, object: nil, queue: .main) { [weak self] _ in
+                self?.updateSelfKeyWindow()
+            },
+            center.addObserver(forName: NSWindow.didResignKeyNotification, object: nil, queue: .main) { [weak self] _ in
+                self?.updateSelfKeyWindow()
+            },
+        ]
+    }
+
+    private func updateSelfKeyWindow() {
+        let isKey = NSApp.keyWindow != nil
+        stateLock.lock()
+        selfWindowIsKey = isKey
+        stateLock.unlock()
     }
 
     private func startWakeObserver() {
@@ -279,13 +352,23 @@ final class SnippetExpander {
         // The system disables the tap when the callback times out; the
         // notification is delivered here and re-arms it. The old build had
         // no re-arm — one slow callback (busy main thread) killed expansion
-        // permanently and silently.
+        // permanently and silently. Re-arm asynchronously: re-enabling
+        // synchronously inside the callback can immediately re-trigger the
+        // disable condition.
         if type == .tapDisabledByTimeout || type == .tapDisabledByUserInput {
             stateLock.lock()
             let tap = eventTap
             stateLock.unlock()
             if let tap {
-                CGEvent.tapEnable(tap: tap, enable: true)
+                DispatchQueue.global(qos: .userInitiated).asyncAfter(deadline: .now() + 0.1) { [weak self] in
+                    guard let self else { return }
+                    self.stateLock.lock()
+                    let current = self.eventTap
+                    self.stateLock.unlock()
+                    if current == tap {
+                        CGEvent.tapEnable(tap: tap, enable: true)
+                    }
+                }
             }
             return true
         }
@@ -298,13 +381,15 @@ final class SnippetExpander {
 
         stateLock.lock()
         keystrokeGeneration += 1
+        let selfKey = selfWindowIsKey
         stateLock.unlock()
 
         // Keystrokes landing in Chum's own UI (launcher search, settings
         // fields) never expand: editing a snippet's keyword in Settings must
         // not fire the snippet. Our panel/windows are the key window only
-        // while the user is actually typing into them.
-        if NSApp.keyWindow != nil {
+        // while the user is actually typing into them. The flag is maintained
+        // on the main thread — AppKit is never touched from this callback.
+        if selfKey {
             clearBuffer()
             return true
         }
@@ -376,13 +461,12 @@ final class SnippetExpander {
     }
 
     private func matchingSnippet() -> Snippet? {
-        let buffer = currentBuffer
+        stateLock.lock()
+        let buffer = self.buffer
+        let snippets = self.snippetSnapshot
+        stateLock.unlock()
         guard !buffer.isEmpty else { return nil }
-        let snippets = SnippetStore.shared.validSnippets
-        for snippet in snippets where snippet.keyword == buffer {
-            return snippet
-        }
-        return nil
+        return snippets.first { $0.keyword == buffer }
     }
 
     /// Terminals turn arrow keys into escape sequences instead of moving the
@@ -401,16 +485,43 @@ final class SnippetExpander {
         "dev.warp.Warp-Stable",
     ]
 
+    /// Browsers where a synthetic Cmd+V is unreliable in web-page fields
+    /// (Chromium family included): the selection sweep lands, but the paste
+    /// key is dropped. There the expansion goes through the Edit → Paste
+    /// menu item via AX instead.
+    private static let browserBundleIDs: Set<String> = [
+        "net.imput.helium",
+        "com.google.Chrome",
+        "com.brave.Browser",
+        "org.chromium.Chromium",
+        "com.microsoft.edgemac",
+        "com.apple.Safari",
+        "company.thebrowser.Browser",
+        "org.mozilla.firefox",
+        "com.vivaldi.Vivaldi",
+        "com.operasoftware.Opera",
+    ]
+
     private static var frontmostIsTerminal: Bool {
         NSWorkspace.shared.frontmostApplication?.bundleIdentifier
             .map(terminalBundleIDs.contains) ?? false
     }
 
-    /// Expands in two phases: erase the typed keyword, then paste the
+    private static var frontmostIsBrowser: Bool {
+        NSWorkspace.shared.frontmostApplication?.bundleIdentifier
+            .map(browserBundleIDs.contains) ?? false
+    }
+
+    /// Expands in two phases: erase the typed keyword, then insert the
     /// expansion in one shot.
     ///
-    /// In normal apps the erase is a Shift+Left selection sweep; in terminals
-    /// it's backspaces. Paste (Cmd+V) instead of typing the text char-by-char:
+    /// In normal apps the erase is a Shift+Left selection sweep, and the
+    /// expansion is inserted by setting the focused element's
+    /// kAXSelectedTextAttribute (browser form fields accept the synthetic
+    /// selection but often ignore a synthetic Cmd+V — the "keyword stays
+    /// highlighted" failure); apps that reject the AX set fall back to a
+    /// pasteboard + synthetic Cmd+V. In terminals the erase is backspaces and
+    /// the insert is the paste. Typing the text char-by-char is never used:
     /// - Address bars (Chrome/Safari omnibox) inline-autocomplete what you
     ///   type; the gray suggestion is a live selection, so the first backspace
     ///   eats the suggestion instead of a typed character and the keyword
@@ -425,18 +536,13 @@ final class SnippetExpander {
     /// keyword, a lagging app), the sweep would select the wrong range —
     /// abort instead of mangling the text.
     private func expand(keyword: String, into expansion: String, generation: Int) {
-        let clipboard = NSPasteboard.general.string(forType: .string) ?? ""
-        let resolved = SnippetTemplate.resolve(expansion, clipboardContent: clipboard)
-
-        // The expansion takes over the pasteboard for a moment; keep the
-        // transient text out of the clipboard history.
-        ClipboardMonitor.shared.suspendCapture()
-
+        // Everything below the generation guard runs off the tap thread: the
+        // pasteboard read, template resolution, and clipboard-history
+        // suspension all happen here, so the tap callback only appends to
+        // the buffer and matches — staying fast enough that the system never
+        // times it out.
         injectQueue.asyncAfter(deadline: .now() + Self.settleInterval) { [weak self] in
-            guard let self else {
-                ClipboardMonitor.shared.resumeCapture()
-                return
-            }
+            guard let self else { return }
 
             stateLock.lock()
             let currentGeneration = keystrokeGeneration
@@ -444,38 +550,163 @@ final class SnippetExpander {
             guard currentGeneration == generation else {
                 // A keystroke landed between the match and the sweep — the
                 // selection would cover the wrong range. Abort cleanly.
-                ClipboardMonitor.shared.resumeCapture()
                 return
             }
+
+            // Read-only clipboard access for template resolution — the
+            // pasteboard is only borrowed (and capture suspended) in paste(),
+            // when the AX path didn't apply.
+            let clipboard = NSPasteboard.general.string(forType: .string) ?? ""
+            let resolved = SnippetTemplate.resolve(expansion, clipboardContent: clipboard)
 
             if Self.frontmostIsTerminal {
                 for _ in 0..<keyword.count {
                     self.sendKey(keyCode: 51, flags: [])
                     Thread.sleep(forTimeInterval: Self.selectionInterval)
                 }
+                Thread.sleep(forTimeInterval: Self.phaseInterval)
+                self.paste(resolved)
             } else {
                 for _ in 0..<keyword.count {
                     self.sendKey(keyCode: 123, flags: .maskShift)
                     Thread.sleep(forTimeInterval: Self.selectionInterval)
                 }
-            }
 
-            Thread.sleep(forTimeInterval: Self.phaseInterval)
+                Thread.sleep(forTimeInterval: Self.phaseInterval)
 
-            let saved = Self.savedPasteboardContent()
-            let pasteboard = NSPasteboard.general
-            pasteboard.clearContents()
-            pasteboard.setString(resolved, forType: .string)
-            self.sendKey(keyCode: 9, flags: .maskCommand)
-
-            // Restore the previous clipboard once the paste has landed;
-            // resumeCapture syncs the monitor's changeCount so neither the
-            // expansion nor the restore is re-captured into the history.
-            self.injectQueue.asyncAfter(deadline: .now() + Self.clipboardRestoreInterval) {
-                Self.restorePasteboardContent(saved)
-                ClipboardMonitor.shared.resumeCapture()
+                if Self.frontmostIsBrowser {
+                    // Browsers: synthetic Cmd+V is unreliable in web-page
+                    // fields, so paste through the Edit → Paste menu item.
+                    self.pasteViaBrowser(resolved)
+                    return
+                }
+                // Preferred path: replace the selection directly through AX.
+                // Setting kAXSelectedTextAttribute replaces the selection
+                // atomically and fires proper input events (framework forms
+                // see it).
+                if Self.setSelectedTextViaAX(resolved) {
+                    return
+                }
+                // Fallback for apps without AX text support: pasteboard +
+                // synthetic Cmd+V.
+                self.paste(resolved)
             }
         }
+    }
+
+    /// Browser paste: borrow the pasteboard, then trigger Edit → Paste via
+    /// AX (Chromium web fields accept the synthetic selection but drop a
+    /// synthetic Cmd+V; the menu item goes through the app's real paste
+    /// path). Falls back to a synthetic Cmd+V if the menu item can't be
+    /// found or pressed.
+    private func pasteViaBrowser(_ resolved: String) {
+        ClipboardMonitor.shared.suspendCapture()
+        let saved = Self.savedPasteboardContent()
+        let pasteboard = NSPasteboard.general
+        pasteboard.clearContents()
+        pasteboard.setString(resolved, forType: .string)
+        // Give the pasteboard write a moment to propagate before the app
+        // reads it on paste.
+        Thread.sleep(forTimeInterval: 0.025)
+        if !Self.pasteViaEditMenu() {
+            sendKey(keyCode: 9, flags: .maskCommand, source: pasteSource)
+        }
+        injectQueue.asyncAfter(deadline: .now() + Self.clipboardRestoreInterval) {
+            Self.restorePasteboardContent(saved)
+            ClipboardMonitor.shared.resumeCapture()
+        }
+    }
+
+    /// Presses the Paste item of the frontmost app's Edit menu, located
+    /// language-independently by its cmd-char "v" with command-only modifiers
+    /// (excludes cmd+shift "Paste and Match Style"). Carbon cmdKey = 0x0100.
+    private static func pasteViaEditMenu() -> Bool {
+        guard let pid = NSWorkspace.shared.frontmostApplication?.processIdentifier else { return false }
+        let app = AXUIElementCreateApplication(pid)
+        var menubarValue: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(app, kAXMenuBarAttribute as CFString, &menubarValue) == .success,
+              let menubarValue,
+              CFGetTypeID(menubarValue) == AXUIElementGetTypeID() else { return false }
+        guard let menus = axChildren(of: menubarValue as! AXUIElement) else { return false }
+        var fallback: AXUIElement?
+        for menu in menus {
+            guard let items = axChildren(of: menu) else { continue }
+            for item in items {
+                guard let cmdChar = axStringAttribute(of: item, kAXMenuItemCmdCharAttribute as CFString),
+                      cmdChar.lowercased() == "v" else { continue }
+                var modifiers = -1
+                if let value = axNumberAttribute(of: item, kAXMenuItemCmdModifiersAttribute as CFString) {
+                    modifiers = value
+                }
+                if modifiers == 0x0100 {
+                    return AXUIElementPerformAction(item, kAXPressAction as CFString) == .success
+                }
+                if fallback == nil { fallback = item }
+            }
+        }
+        if let fallback {
+            return AXUIElementPerformAction(fallback, kAXPressAction as CFString) == .success
+        }
+        return false
+    }
+
+    private static func axChildren(of element: AXUIElement) -> [AXUIElement]? {
+        var value: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(element, kAXChildrenAttribute as CFString, &value) == .success,
+              let value else { return nil }
+        if CFGetTypeID(value) == AXUIElementGetTypeID() {
+            return [value as! AXUIElement]
+        }
+        guard CFGetTypeID(value) == CFArrayGetTypeID() else { return nil }
+        return (value as! NSArray).compactMap { child in
+            CFGetTypeID(child as CFTypeRef) == AXUIElementGetTypeID() ? (child as! AXUIElement) : nil
+        }
+    }
+
+    private static func axStringAttribute(of element: AXUIElement, _ attribute: CFString) -> String? {
+        var value: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(element, attribute, &value) == .success else { return nil }
+        return value as? String
+    }
+
+    private static func axNumberAttribute(of element: AXUIElement, _ attribute: CFString) -> Int? {
+        var value: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(element, attribute, &value) == .success else { return nil }
+        return (value as? NSNumber)?.intValue
+    }
+
+    /// Pasteboard + synthetic Cmd+V: borrows the clipboard for a moment and
+    /// restores it once the paste has landed. Bracketed by
+    /// ClipboardMonitor suspend/resume so neither the override nor the
+    /// restore is captured into the history.
+    private func paste(_ resolved: String) {
+        ClipboardMonitor.shared.suspendCapture()
+        let saved = Self.savedPasteboardContent()
+        let pasteboard = NSPasteboard.general
+        pasteboard.clearContents()
+        pasteboard.setString(resolved, forType: .string)
+        // Give the pasteboard write a moment to propagate before the app
+        // reads it on Cmd+V.
+        Thread.sleep(forTimeInterval: 0.025)
+        sendKey(keyCode: 9, flags: .maskCommand, source: pasteSource)
+
+        injectQueue.asyncAfter(deadline: .now() + Self.clipboardRestoreInterval) {
+            Self.restorePasteboardContent(saved)
+            ClipboardMonitor.shared.resumeCapture()
+        }
+    }
+
+    /// Replaces the focused element's selected text via Accessibility.
+    /// Returns false when there is no focused element or the app rejects the
+    /// set (non-editable targets) — the caller falls back to pasting.
+    private static func setSelectedTextViaAX(_ text: String) -> Bool {
+        let systemWide = AXUIElementCreateSystemWide()
+        var focusedValue: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(systemWide, kAXFocusedUIElementAttribute as CFString, &focusedValue) == .success,
+              let focusedValue,
+              CFGetTypeID(focusedValue) == AXUIElementGetTypeID() else { return false }
+        let focused = focusedValue as! AXUIElement
+        return AXUIElementSetAttributeValue(focused, kAXSelectedTextAttribute as CFString, text as CFTypeRef) == .success
     }
 
     /// Saves every type currently on the general pasteboard so the override
@@ -499,14 +730,15 @@ final class SnippetExpander {
         pasteboard.writeObjects([item])
     }
 
-    private func sendKey(keyCode: UInt16, flags: CGEventFlags) {
-        let keyDown = CGEvent(keyboardEventSource: injectSource, virtualKey: keyCode, keyDown: true)
+    private func sendKey(keyCode: UInt16, flags: CGEventFlags, source: CGEventSource? = nil) {
+        let eventSource = source ?? injectSource
+        let keyDown = CGEvent(keyboardEventSource: eventSource, virtualKey: keyCode, keyDown: true)
         keyDown?.flags = flags
         keyDown?.setIntegerValueField(.eventSourceUserData, value: Self.syntheticTag)
         keyDown?.post(tap: .cghidEventTap)
         Thread.sleep(forTimeInterval: Self.keyPressInterval)
 
-        let keyUp = CGEvent(keyboardEventSource: injectSource, virtualKey: keyCode, keyDown: false)
+        let keyUp = CGEvent(keyboardEventSource: eventSource, virtualKey: keyCode, keyDown: false)
         keyUp?.flags = flags
         keyUp?.setIntegerValueField(.eventSourceUserData, value: Self.syntheticTag)
         keyUp?.post(tap: .cghidEventTap)

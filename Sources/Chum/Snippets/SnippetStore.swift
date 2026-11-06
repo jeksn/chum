@@ -10,6 +10,11 @@ final class SnippetStore: ObservableObject {
 
     static let shared = SnippetStore()
 
+    /// Posted on every mutation (main thread) so background consumers (the
+    /// snippet expander's tap thread) can re-snapshot without touching the
+    /// ObservableObject off-main.
+    static let didChange = Notification.Name("com.chum.snippetStore.didChange")
+
     @Published private(set) var snippets: [Snippet]
 
     private init() {
@@ -83,6 +88,7 @@ final class SnippetStore: ObservableObject {
 
     private func save() {
         Self.save(snippets)
+        NotificationCenter.default.post(name: Self.didChange, object: self)
     }
 
     private func uniqueName(basedOn name: String) -> String {

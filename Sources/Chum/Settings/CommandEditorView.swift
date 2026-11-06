@@ -38,7 +38,7 @@ struct CommandEditorView: View {
             }
             Section {
                 Button("Test on Focused Window") {
-                    CommandApplier.shared.apply(command, target: WindowManipulator.lastActiveNonSelfWindow())
+                    CommandApplier.shared.apply(command, target: WindowManipulator.lastActiveNonSelfWindow(), recordUsage: false)
                 }
             } header: {
                 Text("Test")

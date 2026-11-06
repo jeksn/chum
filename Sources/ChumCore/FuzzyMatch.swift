@@ -101,11 +101,20 @@ public enum FuzzyMatch {
     /// lowercasing, so it is safe to run over large item lists on every
     /// keystroke.
     public static func rankedIndexed<T>(_ indexed: [Indexed<T>], query: String) -> [Indexed<T>] {
+        rankedIndexed(indexed, query: query, bonus: { _ in 0 })
+    }
+
+    /// Same ranking, with a per-item bonus added to each fuzzy score — used
+    /// to lift frequently used items (usage memory) above near-equal fuzzy
+    /// matches. The bonus is expected to be small relative to score gaps, so
+    /// a clearly better textual match still wins.
+    public static func rankedIndexed<T>(_ indexed: [Indexed<T>], query: String, bonus: (T) -> Double) -> [Indexed<T>] {
         guard !query.trimmingCharacters(in: .whitespaces).isEmpty else { return indexed }
         let queryChars = Array(query.lowercased())
         return indexed
-            .compactMap { entry -> (Indexed<T>, Int)? in
-                score(query: queryChars, target: entry.target).map { (entry, $0) }
+            .compactMap { entry -> (Indexed<T>, Double)? in
+                guard let s = score(query: queryChars, target: entry.target) else { return nil }
+                return (entry, Double(s) + bonus(entry.item))
             }
             .sorted { lhs, rhs in
                 if lhs.1 != rhs.1 { return lhs.1 > rhs.1 }

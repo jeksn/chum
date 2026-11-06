@@ -70,6 +70,10 @@ final class HyperkeyEngine: @unchecked Sendable {
     private var teardownSignal: DispatchSemaphore?
     private var setupSucceeded = false
     private var wakeObserver: NSObjectProtocol?
+    /// Bumped on every engine build (guarded by `stateLock`). A stale engine
+    /// thread that finally tears down after a restart must not revert the HID
+    /// remap the NEW engine applied — the revert is generation-guarded.
+    private var engineGeneration = 0
     private let stateLock = NSLock()
 
     // Engine-thread-confined state — never touched from main while running.
@@ -139,7 +143,14 @@ final class HyperkeyEngine: @unchecked Sendable {
         let signal = teardownSignal
         teardownSignal = nil
         let runLoop = engineRunLoop
+        let tap = eventTap
         stateLock.unlock()
+
+        // Disable the tap directly, from this thread: even if the engine
+        // thread is stuck (e.g. inside hidutil) and never services its
+        // teardown, no further callbacks are delivered, so a restart can
+        // never end up with two live engines rewriting the same events.
+        if let tap { CGEvent.tapEnable(tap: tap, enable: false) }
 
         // The thread may have already torn itself down (failed setup).
         guard thread.isExecuting else { return }
@@ -161,9 +172,16 @@ final class HyperkeyEngine: @unchecked Sendable {
     private func runEngine(ready: DispatchSemaphore, teardown: DispatchSemaphore) {
         let runLoop = CFRunLoopGetCurrent()
         stateLock.lock()
+        engineGeneration += 1
+        let generation = engineGeneration
         engineRunLoop = runLoop
         setupSucceeded = false
         stateLock.unlock()
+        // Start from a clean slate even if a previous engine instance left
+        // stale state behind (e.g. a teardown that never ran), and make sure
+        // the session modifier state carries no stuck hyper flags.
+        capsIsDown = false
+        postHyperFlags(down: false)
 
         let eventMask = CGEventMask(
             (1 << CGEventType.flagsChanged.rawValue)
@@ -196,8 +214,10 @@ final class HyperkeyEngine: @unchecked Sendable {
         let source = CFMachPortCreateRunLoopSource(kCFAllocatorDefault, tap, 0)
         CFRunLoopAddSource(runLoop, source, .defaultMode)
         CGEvent.tapEnable(tap: tap, enable: true)
+        stateLock.lock()
         eventTap = tap
         runLoopSource = source
+        stateLock.unlock()
 
         applyCapsRemap()
         if !didApplyCapsRemap {
@@ -208,14 +228,19 @@ final class HyperkeyEngine: @unchecked Sendable {
         stateLock.unlock()
         ready.signal()
         CFRunLoopRun()
-        tearDownEngine()
+        tearDownEngine(generation: generation)
         teardown.signal()
     }
 
     /// Engine thread: reverts the remap, releases modifiers, and removes the
-    /// tap from this thread's run loop.
-    private func tearDownEngine() {
-        if didApplyCapsRemap {
+    /// tap from this thread's run loop. `generation` guards the HID revert —
+    /// a stale thread from before a restart must not undo the remap the
+    /// current engine applied.
+    private func tearDownEngine(generation: Int) {
+        stateLock.lock()
+        let isCurrent = engineGeneration == generation
+        stateLock.unlock()
+        if isCurrent && didApplyCapsRemap {
             didApplyCapsRemap = false
             Self.runHidutil(["property", "--set", Self.capsRemapRevertJSON])
         }
@@ -223,6 +248,7 @@ final class HyperkeyEngine: @unchecked Sendable {
             capsIsDown = false
             postHyperFlags(down: false)
         }
+        stateLock.lock()
         if let tap = eventTap {
             CGEvent.tapEnable(tap: tap, enable: false)
         }
@@ -231,17 +257,30 @@ final class HyperkeyEngine: @unchecked Sendable {
         }
         eventTap = nil
         runLoopSource = nil
-        stateLock.lock()
         engineRunLoop = nil
         stateLock.unlock()
     }
 
     private func handleEvent(type: CGEventType, event: CGEvent) -> CGEvent? {
         // The system disables the tap when the callback times out; the
-        // notification is delivered here and re-arms it.
+        // notification is delivered here and re-arms it. Re-arm
+        // asynchronously with a short delay: re-enabling synchronously
+        // inside the callback can immediately re-trigger the disable
+        // condition and spin.
         if type == .tapDisabledByTimeout || type == .tapDisabledByUserInput {
-            if let tap = eventTap {
-                CGEvent.tapEnable(tap: tap, enable: true)
+            stateLock.lock()
+            let tap = eventTap
+            stateLock.unlock()
+            if let tap {
+                DispatchQueue.global(qos: .userInitiated).asyncAfter(deadline: .now() + 0.1) { [weak self] in
+                    guard let self else { return }
+                    self.stateLock.lock()
+                    let current = self.eventTap
+                    self.stateLock.unlock()
+                    if current == tap {
+                        CGEvent.tapEnable(tap: tap, enable: true)
+                    }
+                }
             }
             return event
         }

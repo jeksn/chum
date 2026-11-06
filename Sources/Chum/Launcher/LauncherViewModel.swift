@@ -711,9 +711,13 @@ final class LauncherViewModel: ObservableObject {
         }
 
         // Scope to the category before ranking so an Apps search doesn't
-        // fuzzy-score commands, snippets, and clipboard items.
+        // fuzzy-score commands, snippets, and clipboard items. Each fuzzy
+        // score gets a bounded usage bonus, so the items you actually use
+        // most (usage memory) rise above near-equal fuzzy matches.
         let scoped = index.filter { includesInCategory($0.item) }
-        var ranked: [LauncherItem] = FuzzyMatch.rankedIndexed(scoped, query: query).map { $0.item.item }
+        var ranked: [LauncherItem] = FuzzyMatch.rankedIndexed(scoped, query: query) { entry in
+            UsageTracker.shared.rankBonus(for: entry.item.id)
+        }.map { $0.item.item }
 
         // An exact alias match beats every fuzzy interpretation: "sys" with
         // an alias "sys" ranks the aliased item first, above System
@@ -790,10 +794,12 @@ final class LauncherViewModel: ObservableObject {
         }
     }
 
+    /// Most-used-first (decayed frequency score), alphabetical for items
+    /// with no recorded usage — the empty-query category lists.
     private func sortedByUsage(_ items: [LauncherItem]) -> [LauncherItem] {
         let ids = items.map(\.id)
-        let recentIDs = UsageTracker.shared.sortedByRecent(ids)
-        let idOrder = Dictionary(uniqueKeysWithValues: recentIDs.enumerated().map { ($1, $0) })
+        let scoredIDs = UsageTracker.shared.sortedByScore(ids)
+        let idOrder = Dictionary(uniqueKeysWithValues: scoredIDs.enumerated().map { ($1, $0) })
         return items.sorted { a, b in
             let ia = idOrder[a.id] ?? Int.max
             let ib = idOrder[b.id] ?? Int.max

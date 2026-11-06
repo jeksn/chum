@@ -325,7 +325,14 @@ final class LauncherController: NSObject, NSWindowDelegate {
     }
 
     private func handle(_ item: LauncherItem) {
-        UsageTracker.shared.record(item.id)
+        // Command rows are recorded by CommandApplier.apply itself (same id),
+        // which also covers hotkey/menu/URL triggers — recording here too
+        // would double-count launcher activations.
+        if case .command = item {
+            // skip
+        } else {
+            UsageTracker.shared.record(item.id)
+        }
         switch item {
         case .command(let command, _):
             close()

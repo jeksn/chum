@@ -17,6 +17,7 @@ TextTransformTests.runAll(runner)
 SnippetTemplateTests.runAll(runner)
 CalculatorTests.runAll(runner)
 SavedColorTests.runAll(runner)
+UsageScoreTests.runAll(runner)
 
 print()
 print(runner.summary)
