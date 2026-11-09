@@ -15,14 +15,11 @@ final class SnippetExpander {
     /// Gap between a synthetic keyDown and its keyUp: zero-length presses get
     /// filtered as noise by some apps.
     private static let keyPressInterval: TimeInterval = 0.006
-    /// Pacing between selection keystrokes. Unlike text-generating events
-    /// (which coalesce and drop characters below ~12ms), plain arrow-key
-    /// events are safe to post almost back-to-back; the gap only needs to
-    /// keep the presses distinct. This matters for feel: the selection is
-    /// built one Shift+Left per keyword character, and at ~12ms apiece the
-    /// highlight visibly swept right-to-left before the paste for longer
-    /// keywords ("!today" crawled for ~110ms).
-    private static let selectionInterval: TimeInterval = 0.002
+    /// Pacing between erase keystrokes (backspaces). Unlike text-generating
+    /// events (which coalesce and drop characters below ~12ms), plain
+    /// backspace events are safe to post almost back-to-back; the gap only
+    /// needs to keep the presses distinct.
+    private static let eraseInterval: TimeInterval = 0.002
     /// Pause between the selection phase and the paste so the app has
     /// processed the selection before the paste replaces it.
     private static let phaseInterval: TimeInterval = 0.015
@@ -51,6 +48,9 @@ final class SnippetExpander {
     /// the wrong range (keyword + the extra typed characters), leaving
     /// residue instead of expanding ("stuck on the trigger").
     private var keystrokeGeneration = 0
+    /// Polls for the Input Monitoring grant while it's missing (guarded by
+    /// `stateLock`; started from main, fires on a utility queue).
+    private var permissionRetryTimer: DispatchSourceTimer?
     private let stateLock = NSLock()
 
     // Maintained on the MAIN thread only (key-window notifications, app
@@ -85,12 +85,18 @@ final class SnippetExpander {
     }
 
     func start() {
+        cancelPermissionRetry()
         guard AppSettings.snippetsEnabled else { return }
         stateLock.lock()
         guard tapThread == nil else { stateLock.unlock(); return }
         stateLock.unlock()
         guard ensureInputMonitoringPermission() else {
-            NSLog("Chum Snippets: Input Monitoring not granted — expansion inactive")
+            // Permission often arrives while the app is already running
+            // (System Settings toggling) — re-check periodically and create
+            // the tap the moment it lands, instead of staying inactive
+            // until the next relaunch.
+            NSLog("Chum Snippets: Input Monitoring not granted — expansion starts as soon as the permission is granted in System Settings")
+            schedulePermissionRetry()
             return
         }
 
@@ -132,6 +138,7 @@ final class SnippetExpander {
 
     func stop() {
         stopWakeObserver()
+        cancelPermissionRetry()
         if let clickMonitor {
             NSEvent.removeMonitor(clickMonitor)
         }
@@ -168,6 +175,42 @@ final class SnippetExpander {
     func restart() {
         stop()
         start()
+    }
+
+    // MARK: - Permission retry
+    //
+    // The tap dies at launch when Input Monitoring is missing; this poll
+    // revives expansion the moment the user grants it in System Settings —
+    // without it, granting while Chum is running leaves snippets dead until
+    // a relaunch.
+
+    private func schedulePermissionRetry() {
+        stateLock.lock()
+        guard permissionRetryTimer == nil else { stateLock.unlock(); return }
+        let timer = DispatchSource.makeTimerSource(queue: DispatchQueue.global(qos: .utility))
+        timer.schedule(deadline: .now() + 2, repeating: 2)
+        timer.setEventHandler { [weak self] in
+            guard let self else { return }
+            if !AppSettings.snippetsEnabled {
+                self.cancelPermissionRetry()
+                return
+            }
+            // Preflight only — never re-request: the request alert already
+            // fired once from start(), the rest happens in System Settings.
+            guard CGPreflightListenEventAccess() else { return }
+            self.cancelPermissionRetry()
+            DispatchQueue.main.async { self.start() }
+        }
+        timer.resume()
+        permissionRetryTimer = timer
+        stateLock.unlock()
+    }
+
+    private func cancelPermissionRetry() {
+        stateLock.lock()
+        permissionRetryTimer?.cancel()
+        permissionRetryTimer = nil
+        stateLock.unlock()
     }
 
     private func ensureInputMonitoringPermission() -> Bool {
@@ -356,6 +399,7 @@ final class SnippetExpander {
         // synchronously inside the callback can immediately re-trigger the
         // disable condition.
         if type == .tapDisabledByTimeout || type == .tapDisabledByUserInput {
+            NSLog("Chum Snippets: event tap disabled (\(type == .tapDisabledByTimeout ? "timeout" : "user input")) — re-arming; keystrokes in this window were missed")
             stateLock.lock()
             let tap = eventTap
             stateLock.unlock()
@@ -470,11 +514,13 @@ final class SnippetExpander {
     }
 
     /// Terminals turn arrow keys into escape sequences instead of moving the
-    /// cursor, so the Shift+Left selection sweep leaks bytes into the buffer
-    /// ("!zsh" -> "!zshDDDD…"). They get the backspace path instead — which
-    /// is safe there, since a shell prompt has no autocomplete suggestion for
-    /// a backspace to eat (the reason the backspace path was abandoned for
-    /// browsers).
+    /// cursor, so the expander never sends arrows: the key-event erase is
+    /// always backspaces, which are safe at a shell prompt (no autocomplete
+    /// suggestion for a backspace to eat). This list is only a fast path that
+    /// skips AX probing for known terminal emulators — any app whose focused
+    /// element exposes no AX text value lands on the backspace path by
+    /// capability as well, so unlisted terminals (WezTerm, a shell inside an
+    /// editor, …) are covered too.
     private static let terminalBundleIDs: Set<String> = [
         "com.apple.Terminal",
         "com.googlecode.iterm2",
@@ -483,13 +529,18 @@ final class SnippetExpander {
         "org.alacritty",
         "co.zeit.hyper",
         "dev.warp.Warp-Stable",
+        "com.github.wez.wezterm",
+        "org.xquartz.X11",
     ]
 
-    /// Browsers where a synthetic Cmd+V is unreliable in web-page fields
-    /// (Chromium family included): the selection sweep lands, but the paste
-    /// key is dropped. There the expansion goes through the Edit → Paste
-    /// menu item via AX instead.
-    private static let browserBundleIDs: Set<String> = [
+    /// Chromium-family apps — browsers AND Electron editors (Obsidian,
+    /// VS Code, …) — where a synthetic Cmd+V is unreliable in web fields
+    /// (Chromium drops the event): the paste-fallback tier goes through the
+    /// Edit → Paste menu item via AX instead. Reaching this tier in an
+    /// Electron editor is common: Chromium exposes its accessibility tree
+    /// lazily, so the first expansion in a cold document often misses the AX
+    /// tiers entirely and relies on this paste path.
+    private static let chromiumPasteBundleIDs: Set<String> = [
         "net.imput.helium",
         "com.google.Chrome",
         "com.brave.Browser",
@@ -500,6 +551,12 @@ final class SnippetExpander {
         "org.mozilla.firefox",
         "com.vivaldi.Vivaldi",
         "com.operasoftware.Opera",
+        "md.obsidian",
+        "com.microsoft.VSCode",
+        "notion.id",
+        "com.tinyspeck.slackmacgap",
+        "com.hnc.Discord",
+        "org.whispersystems.signal-desktop",
     ]
 
     private static var frontmostIsTerminal: Bool {
@@ -507,40 +564,52 @@ final class SnippetExpander {
             .map(terminalBundleIDs.contains) ?? false
     }
 
-    private static var frontmostIsBrowser: Bool {
+    private static var frontmostNeedsMenuPaste: Bool {
         NSWorkspace.shared.frontmostApplication?.bundleIdentifier
-            .map(browserBundleIDs.contains) ?? false
+            .map(chromiumPasteBundleIDs.contains) ?? false
     }
 
-    /// Expands in two phases: erase the typed keyword, then insert the
-    /// expansion in one shot.
+    /// Expands in tiers, most reliable first:
     ///
-    /// In normal apps the erase is a Shift+Left selection sweep, and the
-    /// expansion is inserted by setting the focused element's
-    /// kAXSelectedTextAttribute (browser form fields accept the synthetic
-    /// selection but often ignore a synthetic Cmd+V — the "keyword stays
-    /// highlighted" failure); apps that reject the AX set fall back to a
-    /// pasteboard + synthetic Cmd+V. In terminals the erase is backspaces and
-    /// the insert is the paste. Typing the text char-by-char is never used:
-    /// - Address bars (Chrome/Safari omnibox) inline-autocomplete what you
-    ///   type; the gray suggestion is a live selection, so the first backspace
-    ///   eats the suggestion instead of a typed character and the keyword
-    ///   leaves residue ("!in" -> "!https://…"). The selection covers the
-    ///   autocomplete too and the paste replaces the whole thing.
-    /// - Typing synthetically must be paced ~12ms/char (below that, events
-    ///   coalesce and characters drop), so long expansions streamed visibly
-    ///   for hundreds of milliseconds. A paste lands in a single frame.
+    /// 1. AX selection replace: read the focused element's value and selected
+    ///    text range, point the range at the typed keyword ourselves, and set
+    ///    kAXSelectedTextAttribute to the expansion — atomic, no synthetic
+    ///    key events, no visible highlight, and it preserves rich-text
+    ///    formatting. Works in native apps, browsers (including the omnibox,
+    ///    whose inline autocomplete is a live selection right after the typed
+    ///    text and gets replaced together with the keyword), and editor/
+    ///    Electron fields that expose AX text.
+    /// 2. AX value rewrite: replace the whole kAXValueAttribute with the
+    ///    keyword swapped for the expansion (fields that expose a value but
+    ///    not a settable selection), verified by reading the value back so a
+    ///    read-only element that ignores the set can't cause a double insert
+    ///    on the fallback path.
+    /// 3. Key events: backspace the keyword and paste — pasteboard +
+    ///    synthetic Cmd+V, or the Edit → Paste menu item via AX in
+    ///    Chromium-family apps (browser fields AND Electron editors —
+    ///    Obsidian, VS Code — drop a synthetic Cmd+V in web fields).
+    ///    Terminals skip tiers 1–2 and go straight here.
+    ///
+    /// Synthetic ARROW keys are never sent: terminals turn them into escape
+    /// sequences that leak into the shell ("!zsh" -> "!zshDDDD…"). Backspaces
+    /// are safe everywhere that reaches tier 3 — the omnibox-style autocomplete
+    /// that eats a backspace lives in AX-capable fields handled by tiers 1–2,
+    /// and a shell prompt has no suggestion to eat. Synthetic typing of the
+    /// expansion is never used either: it must be paced ~12ms/char (below that
+    /// events coalesce and characters drop), so long expansions streamed
+    /// visibly for hundreds of milliseconds; a paste or an AX set lands in a
+    /// single frame.
     ///
     /// `generation` is the keystroke count at match time; if any real
-    /// keystroke lands before the sweep begins (fast typing after the
-    /// keyword, a lagging app), the sweep would select the wrong range —
-    /// abort instead of mangling the text.
+    /// keystroke lands before the expansion starts (fast typing after the
+    /// keyword, a lagging app), the computed range would cover the wrong
+    /// text — abort instead of mangling it.
     private func expand(keyword: String, into expansion: String, generation: Int) {
         // Everything below the generation guard runs off the tap thread: the
-        // pasteboard read, template resolution, and clipboard-history
-        // suspension all happen here, so the tap callback only appends to
-        // the buffer and matches — staying fast enough that the system never
-        // times it out.
+        // pasteboard read, template resolution, AX round trips, and
+        // clipboard-history suspension all happen here, so the tap callback
+        // only appends to the buffer and matches — staying fast enough that
+        // the system never times it out.
         injectQueue.asyncAfter(deadline: .now() + Self.settleInterval) { [weak self] in
             guard let self else { return }
 
@@ -548,58 +617,238 @@ final class SnippetExpander {
             let currentGeneration = keystrokeGeneration
             stateLock.unlock()
             guard currentGeneration == generation else {
-                // A keystroke landed between the match and the sweep — the
-                // selection would cover the wrong range. Abort cleanly.
+                // A keystroke landed between the match and the expansion —
+                // the range computed from the probe would be wrong. Abort.
                 return
             }
 
             // Read-only clipboard access for template resolution — the
-            // pasteboard is only borrowed (and capture suspended) in paste(),
-            // when the AX path didn't apply.
+            // pasteboard is only borrowed (and capture suspended) in the paste
+            // paths, when the AX paths didn't apply.
             let clipboard = NSPasteboard.general.string(forType: .string) ?? ""
             let resolved = SnippetTemplate.resolve(expansion, clipboardContent: clipboard)
 
             if Self.frontmostIsTerminal {
-                for _ in 0..<keyword.count {
-                    self.sendKey(keyCode: 51, flags: [])
-                    Thread.sleep(forTimeInterval: Self.selectionInterval)
-                }
-                Thread.sleep(forTimeInterval: Self.phaseInterval)
+                self.eraseWithBackspaces(keyword.count)
                 self.paste(resolved)
+                return
+            }
+
+            // Both AX tiers need the Accessibility grant — without it every
+            // probe fails immediately, and with the cold-tree poll below the
+            // budget roll-forward would turn each expansion into a ~1.2s
+            // wait before the (working) key-event tier.
+            if Accessibility.isTrusted,
+               let probe = Self.awaitTextProbe(keyword: keyword) {
+                if Self.replaceSelectionViaAX(probe, keyword: keyword, expansion: resolved) { return }
+                if Self.replaceValueViaAX(keyword: keyword, expansion: resolved) { return }
+            }
+
+            // No AX text (an unlisted terminal, or an app that exposes none):
+            // erase with backspaces, then paste.
+            self.eraseWithBackspaces(keyword.count)
+            if Self.frontmostNeedsMenuPaste {
+                self.pasteViaChromiumMenu(resolved)
             } else {
-                for _ in 0..<keyword.count {
-                    self.sendKey(keyCode: 123, flags: .maskShift)
-                    Thread.sleep(forTimeInterval: Self.selectionInterval)
-                }
-
-                Thread.sleep(forTimeInterval: Self.phaseInterval)
-
-                if Self.frontmostIsBrowser {
-                    // Browsers: synthetic Cmd+V is unreliable in web-page
-                    // fields, so paste through the Edit → Paste menu item.
-                    self.pasteViaBrowser(resolved)
-                    return
-                }
-                // Preferred path: replace the selection directly through AX.
-                // Setting kAXSelectedTextAttribute replaces the selection
-                // atomically and fires proper input events (framework forms
-                // see it).
-                if Self.setSelectedTextViaAX(resolved) {
-                    return
-                }
-                // Fallback for apps without AX text support: pasteboard +
-                // synthetic Cmd+V.
                 self.paste(resolved)
             }
         }
     }
 
-    /// Browser paste: borrow the pasteboard, then trigger Edit → Paste via
-    /// AX (Chromium web fields accept the synthetic selection but drop a
-    /// synthetic Cmd+V; the menu item goes through the app's real paste
-    /// path). Falls back to a synthetic Cmd+V if the menu item can't be
-    /// found or pressed.
-    private func pasteViaBrowser(_ resolved: String) {
+    // MARK: - AX text surgery
+    //
+    // The focused element's text is read and written through Accessibility
+    // instead of synthetic arrow keys: no escape-byte leaks, no selection
+    // sweep that some fields ignore, no leftover highlight when the insert
+    // is dropped.
+
+    /// Upper bound on the value we are willing to read/rewrite — terminal
+    /// scrollback and huge documents are excluded, which also routes them to
+    /// the backspace path.
+    private static let axValueSizeCap = 200_000
+
+    private struct AXTextProbe {
+        let element: AXUIElement
+        let value: String
+        let selectionStart: Int  // UTF-16 offsets, matching AX/CFRange
+        let selectionLength: Int
+    }
+
+    /// Why a probe returned no text, when it did: `noFocusedElement` is the
+    /// cold-tree state (keep probing — waiting can still pay off), while
+    /// `noEditableText` means a focused element resolved but the text tiers
+    /// can never apply to it (waiting is wasted — fall through fast).
+    private enum AXTextProbeOutcome {
+        case probe(AXTextProbe)
+        case noFocusedElement
+        case noEditableText
+    }
+
+    /// The focused element's value + selected text range, or why that
+    /// couldn't be read.
+    private static func probeFocusedText() -> AXTextProbeOutcome {
+        let systemWide = AXUIElementCreateSystemWide()
+        var focusedValue: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(systemWide, kAXFocusedUIElementAttribute as CFString, &focusedValue) == .success,
+              let focusedValue,
+              CFGetTypeID(focusedValue) == AXUIElementGetTypeID() else { return .noFocusedElement }
+        let focused = focusedValue as! AXUIElement
+
+        // Skip huge values (terminal scrollback, big documents) without
+        // reading them.
+        var charCountRef: CFTypeRef?
+        if AXUIElementCopyAttributeValue(focused, kAXNumberOfCharactersAttribute as CFString, &charCountRef) == .success,
+           let count = (charCountRef as? NSNumber)?.intValue, count > axValueSizeCap {
+            return .noEditableText
+        }
+
+        var valueRef: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(focused, kAXValueAttribute as CFString, &valueRef) == .success,
+              let value = valueRef as? String,
+              value.utf16.count <= axValueSizeCap else { return .noEditableText }
+
+        var rangeRef: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(focused, kAXSelectedTextRangeAttribute as CFString, &rangeRef) == .success,
+              let rangeRef,
+              CFGetTypeID(rangeRef) == AXValueGetTypeID() else { return .noEditableText }
+        var range = CFRange(location: 0, length: 0)
+        guard AXValueGetValue(rangeRef as! AXValue, .cfRange, &range) else { return .noEditableText }
+
+        return .probe(AXTextProbe(element: focused, value: value,
+                                  selectionStart: range.location, selectionLength: range.length))
+    }
+
+    /// Budget for the typed keyword to show up at the caret/selection once
+    /// AX resolves an element (apps process the final keystroke
+    /// asynchronously, so the value read right after the match can lag).
+    private static let probeInterval: TimeInterval = 0.15
+    /// Hard cap while AX returns no focused element at all. Chromium-family
+    /// apps (browsers AND Electron editors — Obsidian, VS Code, …) build
+    /// the accessibility tree LAZILY: the first query from a new client can
+    /// return nothing for hundreds of milliseconds. Without the extension,
+    /// the first expansion attempt in a cold document burns the whole probe
+    /// budget, falls to the erase+paste tier — and in Chromium family the
+    /// synthetic ⌘-V is dropped, so the keyword is erased with nothing
+    /// pasted: the "works on the second try, never the first" symptom. The
+    /// tree stays warm after that first query, so the cost is one-time.
+    private static let coldTreeProbeInterval: TimeInterval = 0.6
+
+    /// Probes until the typed keyword shows up at the caret/selection —
+    /// short budget once an element resolves, extended (up to the hard cap)
+    /// while the AX tree is still cold and no element resolves at all.
+    private static func awaitTextProbe(keyword: String) -> AXTextProbe? {
+        let hardDeadline = Date().addingTimeInterval(Self.coldTreeProbeInterval)
+        var deadline = Date().addingTimeInterval(Self.probeInterval)
+        var seenElement = false
+        while Date() < deadline {
+            switch probeFocusedText() {
+            case .probe(let probe):
+                seenElement = true
+                if SnippetTextEdit.replacementRange(value: probe.value,
+                                                    selectionStart: probe.selectionStart,
+                                                    selectionLength: probe.selectionLength,
+                                                    keyword: keyword) != nil {
+                    return probe
+                }
+            case .noEditableText:
+                seenElement = true
+            case .noFocusedElement:
+                break
+            }
+            // Cold tree: roll the budget forward, bounded by the hard cap.
+            // A resolved element keeps the remaining (short) budget as is.
+            if !seenElement {
+                let extended = Date().addingTimeInterval(Self.probeInterval)
+                if extended < hardDeadline {
+                    deadline = extended
+                }
+            }
+            Thread.sleep(forTimeInterval: 0.02)
+        }
+        return nil
+    }
+
+    private static func setSelectedRange(of element: AXUIElement, _ range: CFRange) -> Bool {
+        var cfRange = range
+        guard let value = AXValueCreate(.cfRange, &cfRange) else { return false }
+        return AXUIElementSetAttributeValue(element, kAXSelectedTextRangeAttribute as CFString, value) == .success
+    }
+
+    /// Tier 1: point the selected text range at the keyword via AX (no
+    /// synthetic arrow keys), then replace the selection with the expansion
+    /// in one kAXSelectedTextAttribute set. Verified by read-back, and on
+    /// failure the original selection is restored so a later backspace
+    /// fallback doesn't delete more than the keyword.
+    private static func replaceSelectionViaAX(_ probe: AXTextProbe, keyword: String, expansion: String) -> Bool {
+        guard let range = SnippetTextEdit.replacementRange(value: probe.value,
+                                                           selectionStart: probe.selectionStart,
+                                                           selectionLength: probe.selectionLength,
+                                                           keyword: keyword) else { return false }
+        let expected = SnippetTextEdit.replacedValue(value: probe.value, range: range, expansion: expansion)
+        guard setSelectedRange(of: probe.element, CFRange(location: range.location, length: range.length)),
+              AXUIElementSetAttributeValue(probe.element, kAXSelectedTextAttribute as CFString, expansion as CFTypeRef) == .success,
+              Self.verifyApplied(element: probe.element, expected: expected, insertLocation: range.location, expansion: expansion)
+        else {
+            _ = setSelectedRange(of: probe.element, CFRange(location: probe.selectionStart, length: probe.selectionLength))
+            return false
+        }
+        _ = setSelectedRange(of: probe.element, CFRange(location: SnippetTextEdit.caretAfterExpansion(in: range, expansion: expansion), length: 0))
+        return true
+    }
+
+    /// Tier 2: rewrite the whole value with the keyword replaced by the
+    /// expansion, verified by read-back — the caret is only moved once the
+    /// set is confirmed, so a read-only element that ignores the write can't
+    /// send the backspace fallback erasing from the wrong position.
+    private static func replaceValueViaAX(keyword: String, expansion: String) -> Bool {
+        guard let probe = awaitTextProbe(keyword: keyword),
+              let range = SnippetTextEdit.replacementRange(value: probe.value,
+                                                           selectionStart: probe.selectionStart,
+                                                           selectionLength: probe.selectionLength,
+                                                           keyword: keyword) else { return false }
+        let newValue = SnippetTextEdit.replacedValue(value: probe.value, range: range, expansion: expansion)
+        guard AXUIElementSetAttributeValue(probe.element, kAXValueAttribute as CFString, newValue as CFTypeRef) == .success,
+              Self.verifyApplied(element: probe.element, expected: newValue, insertLocation: range.location, expansion: expansion)
+        else { return false }
+        _ = setSelectedRange(of: probe.element, CFRange(location: SnippetTextEdit.caretAfterExpansion(in: range, expansion: expansion), length: 0))
+        return true
+    }
+
+    /// Reads the value back until it shows the edit applied (some apps
+    /// normalize on set, so exact equality alone would misread a success).
+    /// Read-only elements can report success while ignoring the write —
+    /// detecting that is what keeps the fallback path from double-inserting.
+    private static func verifyApplied(element: AXUIElement, expected: String, insertLocation: Int, expansion: String) -> Bool {
+        let deadline = Date().addingTimeInterval(0.1)
+        while Date() < deadline {
+            var valueRef: CFTypeRef?
+            if AXUIElementCopyAttributeValue(element, kAXValueAttribute as CFString, &valueRef) == .success,
+               let current = valueRef as? String,
+               SnippetTextEdit.isApplied(current: current, expected: expected,
+                                         insertLocation: insertLocation, expansion: expansion) {
+                return true
+            }
+            Thread.sleep(forTimeInterval: 0.02)
+        }
+        return false
+    }
+
+    /// Key-event erase: one backspace per typed character, then a beat for
+    /// the app to process them before the insert.
+    private func eraseWithBackspaces(_ count: Int) {
+        for _ in 0..<count {
+            sendKey(keyCode: 51, flags: [])
+            Thread.sleep(forTimeInterval: Self.eraseInterval)
+        }
+        Thread.sleep(forTimeInterval: Self.phaseInterval)
+    }
+
+    /// Chromium-family paste: borrow the pasteboard, then trigger Edit →
+    /// Paste via AX (Chromium web fields — browsers and Electron editors
+    /// alike — accept the synthetic selection but drop a synthetic Cmd+V;
+    /// the menu item goes through the app's real paste path). Falls back to
+    /// a synthetic Cmd+V if the menu item can't be found or pressed.
+    private func pasteViaChromiumMenu(_ resolved: String) {
         ClipboardMonitor.shared.suspendCapture()
         let saved = Self.savedPasteboardContent()
         let pasteboard = NSPasteboard.general
@@ -694,19 +943,6 @@ final class SnippetExpander {
             Self.restorePasteboardContent(saved)
             ClipboardMonitor.shared.resumeCapture()
         }
-    }
-
-    /// Replaces the focused element's selected text via Accessibility.
-    /// Returns false when there is no focused element or the app rejects the
-    /// set (non-editable targets) — the caller falls back to pasting.
-    private static func setSelectedTextViaAX(_ text: String) -> Bool {
-        let systemWide = AXUIElementCreateSystemWide()
-        var focusedValue: CFTypeRef?
-        guard AXUIElementCopyAttributeValue(systemWide, kAXFocusedUIElementAttribute as CFString, &focusedValue) == .success,
-              let focusedValue,
-              CFGetTypeID(focusedValue) == AXUIElementGetTypeID() else { return false }
-        let focused = focusedValue as! AXUIElement
-        return AXUIElementSetAttributeValue(focused, kAXSelectedTextAttribute as CFString, text as CFTypeRef) == .success
     }
 
     /// Saves every type currently on the general pasteboard so the override

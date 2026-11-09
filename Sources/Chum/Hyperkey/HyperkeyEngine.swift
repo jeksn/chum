@@ -74,6 +74,9 @@ final class HyperkeyEngine: @unchecked Sendable {
     /// thread that finally tears down after a restart must not revert the HID
     /// remap the NEW engine applied — the revert is generation-guarded.
     private var engineGeneration = 0
+    /// Polls for the Accessibility grant while it's missing (guarded by
+    /// `stateLock`; started from main, fires on a utility queue).
+    private var permissionRetryTimer: DispatchSourceTimer?
     private let stateLock = NSLock()
 
     // Engine-thread-confined state — never touched from main while running.
@@ -94,12 +97,20 @@ final class HyperkeyEngine: @unchecked Sendable {
     }
 
     func start() {
+        cancelPermissionRetry()
         guard AppSettings.hyperKeyEnabled else { return }
         stateLock.lock()
         guard engineThread == nil else { stateLock.unlock(); return }
         stateLock.unlock()
         // The tap consumes and rewrites events, which requires Accessibility.
-        guard Accessibility.isTrusted else { return }
+        guard Accessibility.isTrusted else {
+            // Permission often arrives while the app is already running
+            // (System Settings toggling) — re-check periodically and start
+            // the engine the moment it lands, instead of staying dead
+            // until the next relaunch.
+            schedulePermissionRetry()
+            return
+        }
 
         let ready = DispatchSemaphore(value: 0)
         let teardown = DispatchSemaphore(value: 0)
@@ -137,6 +148,7 @@ final class HyperkeyEngine: @unchecked Sendable {
 
     func stop() {
         stopWakeObserver()
+        cancelPermissionRetry()
         stateLock.lock()
         guard let thread = engineThread else { stateLock.unlock(); return }
         engineThread = nil
@@ -164,6 +176,40 @@ final class HyperkeyEngine: @unchecked Sendable {
     func restart() {
         stop()
         start()
+    }
+
+    // MARK: - Permission retry
+    //
+    // Both event-tap features die silently when their permission is missing
+    // at launch; this poll revives the engine the moment the user grants
+    // Accessibility in System Settings — without it, granting while Chum is
+    // running leaves everything dead until a relaunch.
+
+    private func schedulePermissionRetry() {
+        stateLock.lock()
+        guard permissionRetryTimer == nil else { stateLock.unlock(); return }
+        let timer = DispatchSource.makeTimerSource(queue: DispatchQueue.global(qos: .utility))
+        timer.schedule(deadline: .now() + 2, repeating: 2)
+        timer.setEventHandler { [weak self] in
+            guard let self else { return }
+            if !AppSettings.hyperKeyEnabled {
+                self.cancelPermissionRetry()
+                return
+            }
+            guard Accessibility.isTrusted else { return }
+            self.cancelPermissionRetry()
+            DispatchQueue.main.async { self.start() }
+        }
+        timer.resume()
+        permissionRetryTimer = timer
+        stateLock.unlock()
+    }
+
+    private func cancelPermissionRetry() {
+        stateLock.lock()
+        permissionRetryTimer?.cancel()
+        permissionRetryTimer = nil
+        stateLock.unlock()
     }
 
     /// Engine thread: sets up the tap on this thread's run loop, signals
@@ -268,6 +314,23 @@ final class HyperkeyEngine: @unchecked Sendable {
         // inside the callback can immediately re-trigger the disable
         // condition and spin.
         if type == .tapDisabledByTimeout || type == .tapDisabledByUserInput {
+            // The disable means events were dropped on the floor — if caps
+            // was held, its F18 keyDown/keyUp were among them and the
+            // tracked down-state is now wrong in one of two ways: a missed
+            // keyUp leaves capsIsDown stuck TRUE (every later keystroke gets
+            // ⌃⌥⇧⌘ spliced in — random hotkey firing), a missed keyDown
+            // leaves it FALSE (the current combo just silently doesn't
+            // fire). Reset both the flag and the synthetic session flags so
+            // the engine's state matches reality when the tap re-arms; the
+            // current press is lost either way, the next one is clean.
+            // Secure Event Input (a focused password field) is the one
+            // starve-out that delivers NO notification at all — nothing to
+            // recover from here; it lifts when the field loses focus.
+            if capsIsDown {
+                capsIsDown = false
+                postHyperFlags(down: false)
+            }
+            NSLog("Chum Hyperkey: event tap disabled (\(type == .tapDisabledByTimeout ? "timeout" : "user input")) — re-arming; state reset")
             stateLock.lock()
             let tap = eventTap
             stateLock.unlock()
