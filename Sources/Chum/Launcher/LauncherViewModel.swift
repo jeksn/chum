@@ -86,6 +86,7 @@ enum LauncherItem: Identifiable {
     case colorEntry(SavedColor)
     case categoryEntry(LauncherViewModel.Category)
     case toolEntry(LauncherViewModel.Category, number: Int)
+    case transformEntry(TextTransform)
     case calculatorResult(title: String, subtitle: String, valueToCopy: String)
 
     var id: String {
@@ -104,6 +105,8 @@ enum LauncherItem: Identifiable {
             return "category.\(category.rawValue)"
         case .toolEntry(let category, _):
             return "tool.\(category.rawValue)"
+        case .transformEntry(let transform):
+            return "transform.\(transform.rawValue)"
         case .calculatorResult:
             return "calculator"
         }
@@ -129,6 +132,8 @@ enum LauncherItem: Identifiable {
             return category.label
         case .toolEntry(let category, _):
             return category.label
+        case .transformEntry(let transform):
+            return transform.name
         case .calculatorResult(let title, _, _):
             return title
         }
@@ -138,7 +143,7 @@ enum LauncherItem: Identifiable {
         switch self {
         case .command(_, let name), .appShortcut(_, let name), .installedApp(_, let name):
             return name
-        case .launcherAction, .clipboardEntry, .snippetEntry, .colorEntry, .categoryEntry, .toolEntry, .calculatorResult:
+        case .launcherAction, .clipboardEntry, .snippetEntry, .colorEntry, .categoryEntry, .toolEntry, .transformEntry, .calculatorResult:
             return nil
         }
     }
@@ -171,6 +176,8 @@ enum LauncherItem: Identifiable {
             return category.icon
         case .toolEntry(let category, _):
             return category.icon
+        case .transformEntry:
+            return "textformat"
         case .calculatorResult:
             return "plus.forwardslash.minus"
         }
@@ -184,7 +191,7 @@ enum LauncherItem: Identifiable {
             return LauncherIconCache.clipboardImage(for: item)
         case .colorEntry(let color):
             return LauncherIconCache.colorSwatch(for: color)
-        case .command, .appShortcut, .launcherAction, .snippetEntry, .categoryEntry, .toolEntry, .calculatorResult:
+        case .command, .appShortcut, .launcherAction, .snippetEntry, .categoryEntry, .toolEntry, .transformEntry, .calculatorResult:
             return nil
         }
     }
@@ -218,6 +225,8 @@ enum LauncherItem: Identifiable {
             return "Browse"
         case .toolEntry:
             return "Tools"
+        case .transformEntry:
+            return "Text Transforms"
         case .calculatorResult:
             return "Calculator"
         }
@@ -239,6 +248,8 @@ enum LauncherItem: Identifiable {
             return snippet.keyword
         case .colorEntry(let color):
             return color.rgbText
+        case .transformEntry:
+            return "Transform the selected text"
         case .calculatorResult(_, let subtitle, _):
             return subtitle
         default:
@@ -662,7 +673,7 @@ final class LauncherViewModel: ObservableObject {
 
     func isFavoritable(_ item: LauncherItem) -> Bool {
         switch item {
-        case .calculatorResult, .clipboardEntry, .colorEntry, .categoryEntry, .toolEntry:
+        case .calculatorResult, .clipboardEntry, .colorEntry, .categoryEntry, .toolEntry, .transformEntry:
             return false
         default:
             return true
@@ -777,7 +788,7 @@ final class LauncherViewModel: ObservableObject {
         }
     }
 
-    private static let sectionOrder = ["Calculator", "Browse", "Window Commands", "Actions", "Shortcuts", "Applications", "Clipboard", "Snippets", "Colors", "Chum"]
+    private static let sectionOrder = ["Calculator", "Browse", "Window Commands", "Actions", "Text Transforms", "Shortcuts", "Applications", "Clipboard", "Snippets", "Colors", "Chum"]
 
     private static func makeSections(from items: [LauncherItem]) -> [LauncherSection] {
         sectionOrder.compactMap { title in

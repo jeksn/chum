@@ -152,6 +152,10 @@ final class LauncherController: NSObject, NSWindowDelegate {
         items.append(contentsOf: SnippetStore.shared.validSnippets.map { .snippetEntry($0) })
         items.append(contentsOf: ClipboardStore.shared.items.map { .clipboardEntry($0) })
         items.append(contentsOf: ColorStore.shared.colors.map { .colorEntry($0) })
+        // Text transforms are searchable rows in the main search too — the
+        // user's enabled set in their chosen order, so search and the tool
+        // list stay in sync.
+        items.append(contentsOf: AppSettings.orderedTransforms.map { .transformEntry($0) })
         items.append(contentsOf: LauncherViewModel.Category.visibleCases.compactMap { category -> LauncherItem? in
             switch category {
             case .all, .chum:
@@ -275,6 +279,37 @@ final class LauncherController: NSObject, NSWindowDelegate {
         HUD.show("Selection replaced")
     }
 
+    /// A transform row activated straight from the main search — no tool
+    /// view or preview: the panel is closed first (the target app stays
+    /// frontmost and the synthetic Cmd+V/C reach it), then the selection is
+    /// captured and replaced in one pass.
+    private func applyTransformDirectly(_ transform: TextTransform) {
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            guard let self else { return }
+            let axText = TextTransformerController.shared.axSelectedText()
+            if let axText, !axText.isEmpty {
+                DispatchQueue.main.async {
+                    self.finishDirectTransform(transform, text: axText)
+                }
+                return
+            }
+            // The panel is already closed, so the tool's pasteboard-capture
+            // fallback (synthetic Cmd+C) works unchanged.
+            TextTransformerController.shared.captureViaPasteboard { [weak self] captured in
+                self?.finishDirectTransform(transform, text: captured)
+            }
+        }
+    }
+
+    private func finishDirectTransform(_ transform: TextTransform, text: String?) {
+        guard let text, !text.isEmpty else {
+            HUD.show("Nothing selected")
+            return
+        }
+        TextTransformerController.shared.apply(transform, to: text)
+        HUD.show("Selection replaced")
+    }
+
     func handleEscape() {
         if viewModel.selectedCategory != .all {
             // From a tool or category, back to the All search.
@@ -394,6 +429,9 @@ final class LauncherController: NSObject, NSWindowDelegate {
             NSPasteboard.general.clearContents()
             NSPasteboard.general.setString(resolved, forType: .string)
             HUD.show("Snippet copied to clipboard")
+        case .transformEntry(let transform):
+            close()
+            applyTransformDirectly(transform)
         case .calculatorResult(_, _, let value):
             close()
             let pasteboard = NSPasteboard.general
